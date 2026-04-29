@@ -17,7 +17,7 @@ from .presets import MOODS, get_mood_names
 from .transitions import join_segments
 from .color_grading import apply_color_grade, get_grade_names, apply_visual_effects
 from .ollama_bridge import list_ollama_models, ask_ollama, ask_ollama_with_descriptions, frames_to_base64
-from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames
+from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
 class DJ_AutoEditor:
@@ -98,6 +98,10 @@ class DJ_AutoEditor:
                     "default": "enable",
                     "tooltip": "Use Florence-2 AI to analyze video content for smarter editing decisions",
                 }),
+                "vision_quality": (get_vision_quality_names(), {
+                    "default": "fast",
+                    "tooltip": "Vision analysis speed/quality: detailed (slowest) → balanced → fast (recommended) → turbo (fastest)",
+                }),
                 "distortion_removal": (["skip_frames", "freeze_frames", "disable"], {
                     "default": "freeze_frames",
                     "tooltip": "Detect and handle AI-generated distortion frames. Skip=shorter video, Freeze=replace with clean frame",
@@ -130,8 +134,8 @@ class DJ_AutoEditor:
 
     CATEGORY = "audio/video processing"
     FUNCTION = "auto_edit"
-    RETURN_NAMES = ("images_output", "audio_output", "video_info_output", "edit_report", "vision_descriptions", "vision_context")
-    RETURN_TYPES = ("IMAGE", "AUDIO", "VHS_VIDEOINFO", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("images_output", "audio_output", "video_info_output", "edit_report", "vision_descriptions")
+    RETURN_TYPES = ("IMAGE", "AUDIO", "VHS_VIDEOINFO", "STRING", "STRING")
 
     # ─── Mood descriptions for the edit report ────────────────────────────
     MOOD_DESCRIPTIONS = {
@@ -720,6 +724,7 @@ class DJ_AutoEditor:
             enable_jump_cuts = True
             enable_micro_ramp = True
             enable_vision = True
+            vision_quality = kwargs.get("vision_quality", "fast")
             distortion_mode = "freeze_frames"
             enable_contrast_protect = True
             enable_phased = True
@@ -735,6 +740,7 @@ class DJ_AutoEditor:
             enable_jump_cuts = kwargs.get("jump_cuts", "enable") == "enable"
             enable_micro_ramp = kwargs.get("micro_speed_ramps", "enable") == "enable"
             enable_vision = kwargs.get("vision_analysis", "enable") == "enable"
+            vision_quality = kwargs.get("vision_quality", "fast")
             distortion_mode = kwargs.get("distortion_removal", "freeze_frames")
             enable_contrast_protect = kwargs.get("contrast_protect", "enable") == "enable"
             enable_phased = kwargs.get("phased_fragmentation", "enable") == "enable"
@@ -806,9 +812,9 @@ class DJ_AutoEditor:
         vision_context = ""
         vision_error = ""
         if enable_vision:
-            print(f"[AutoEditor] 👁️ Running Florence-2 Vision Director...")
+            print(f"[AutoEditor] 👁️ Running Florence-2 Vision Director (quality={vision_quality})...")
             try:
-                vision_descriptions = analyze_videos(all_images, fps)
+                vision_descriptions = analyze_videos(all_images, fps, quality=vision_quality)
                 if vision_descriptions:
                     vision_context = format_descriptions_for_llm(
                         vision_descriptions, all_images, fps
@@ -1198,7 +1204,6 @@ class DJ_AutoEditor:
         print(f"{'='*60}\n")
 
         # ── Build Florence-2 description outputs ─────────────────────────
-        # Output 1: Raw descriptions (per-video keyframe captions)
         raw_descriptions = ""
         if vision_descriptions:
             lines = []
@@ -1213,11 +1218,8 @@ class DJ_AutoEditor:
         else:
             raw_descriptions = f"(Vision analysis was disabled or unavailable)\nError: {vision_error}"
 
-        # Output 2: Full advertising context (what the LLM received)
-        full_context = vision_context if vision_context else f"(No vision context available)\nError: {vision_error}"
-
         return (combined_frames, audio_output, video_info_output, edit_report,
-                raw_descriptions, full_context)
+                raw_descriptions)
 
     # ─── Report builder ──────────────────────────────────────────────────
 

@@ -21,14 +21,52 @@ from pathlib import Path
 FLORENCE_MODEL_NAME = "Florence-2-large"
 FLORENCE_REPO_ID = "microsoft/Florence-2-large"
 
-# Frame position labels for the LLM context
-KEYFRAME_LABELS = [
-    "Opening",
-    "Early-mid",
-    "Midpoint",
-    "Late-mid",
-    "Closing",
-]
+# Frame position labels for the LLM context (indexed by count)
+KEYFRAME_LABELS_5 = ["Opening", "Early-mid", "Midpoint", "Late-mid", "Closing"]
+KEYFRAME_LABELS_3 = ["Opening", "Midpoint", "Closing"]
+KEYFRAME_LABELS_2 = ["Opening", "Closing"]
+
+# ─── Vision Quality Presets ───────────────────────────────────────────────────
+# Each preset controls: keyframes per video, caption task, beam search, max tokens
+
+VISION_PRESETS = {
+    "detailed": {
+        "keyframe_positions": [0.0, 0.25, 0.5, 0.75, 1.0],
+        "keyframe_labels": KEYFRAME_LABELS_5,
+        "caption_task": "<DETAILED_CAPTION>",
+        "num_beams": 3,
+        "max_tokens": 256,
+        "description": "5 keyframes, detailed captions, beam search (slowest, best quality)",
+    },
+    "balanced": {
+        "keyframe_positions": [0.0, 0.5, 1.0],
+        "keyframe_labels": KEYFRAME_LABELS_3,
+        "caption_task": "<DETAILED_CAPTION>",
+        "num_beams": 1,
+        "max_tokens": 128,
+        "description": "3 keyframes, detailed captions, greedy decoding",
+    },
+    "fast": {
+        "keyframe_positions": [0.0, 0.5, 1.0],
+        "keyframe_labels": KEYFRAME_LABELS_3,
+        "caption_task": "<CAPTION>",
+        "num_beams": 1,
+        "max_tokens": 128,
+        "description": "3 keyframes, simple captions, greedy decoding (recommended)",
+    },
+    "turbo": {
+        "keyframe_positions": [0.0, 1.0],
+        "keyframe_labels": KEYFRAME_LABELS_2,
+        "caption_task": "<CAPTION>",
+        "num_beams": 1,
+        "max_tokens": 64,
+        "description": "2 keyframes only, simple captions, minimal tokens (fastest)",
+    },
+}
+
+def get_vision_quality_names():
+    """Return list of vision quality preset names for the ComfyUI dropdown."""
+    return list(VISION_PRESETS.keys())
 
 
 # ─── Florence-2 Model Management ─────────────────────────────────────────────
@@ -258,7 +296,8 @@ def _unload_florence2(model, offload_device):
 
 # ─── Captioning ───────────────────────────────────────────────────────────────
 
-def _caption_frame(model, processor, frame_tensor, dtype, device, task="<DETAILED_CAPTION>"):
+def _caption_frame(model, processor, frame_tensor, dtype, device,
+                   task="<DETAILED_CAPTION>", num_beams=3, max_tokens=256):
     """Generate a text caption for a single frame tensor [H,W,C] in [0,1]."""
     from PIL import Image
 
@@ -278,9 +317,9 @@ def _caption_frame(model, processor, frame_tensor, dtype, device, task="<DETAILE
         generated_ids = model.generate(
             input_ids=input_ids,
             pixel_values=pixel_values,
-            max_new_tokens=256,
+            max_new_tokens=max_tokens,
             do_sample=False,
-            num_beams=3,
+            num_beams=num_beams,
             use_cache=False,
         )
 
@@ -418,7 +457,7 @@ def remove_distorted_frames(frames, bad_indices, mode="freeze"):
 
 # ─── Main Analysis Pipeline ──────────────────────────────────────────────────
 
-def analyze_videos(all_images, fps):
+def analyze_videos(all_images, fps, quality="fast"):
     """
     Full vision analysis pipeline:
     1. Load Florence-2
@@ -430,13 +469,24 @@ def analyze_videos(all_images, fps):
     Args:
         all_images: dict {video_idx: [N, H, W, C] tensor}
         fps: frames per second
+        quality: preset name — "detailed", "balanced", "fast" (default), "turbo"
 
     Returns:
         descriptions: dict {video_idx: [(label, caption), ...]}
         or None if Florence-2 is not available
     """
+    preset = VISION_PRESETS.get(quality, VISION_PRESETS["fast"])
+    positions = preset["keyframe_positions"]
+    labels = preset["keyframe_labels"]
+    caption_task = preset["caption_task"]
+    num_beams = preset["num_beams"]
+    max_tokens = preset["max_tokens"]
+    n_keyframes = len(positions)
+    total_captions = n_keyframes * len(all_images)
+
     print(f"[VisionDirector] 🚀 Starting video content analysis...")
-    print(f"[VisionDirector]    Videos to analyze: {len(all_images)}")
+    print(f"[VisionDirector]    Quality: {quality} — {preset['description']}")
+    print(f"[VisionDirector]    Videos: {len(all_images)}, Keyframes/video: {n_keyframes}, Total captions: {total_captions}")
     print(f"[VisionDirector]    FPS: {fps}")
 
     # Check and download model
@@ -455,6 +505,7 @@ def analyze_videos(all_images, fps):
         return None
 
     descriptions = {}
+    caption_count = 0
 
     try:
         for vid_idx in sorted(all_images.keys()):
@@ -462,15 +513,18 @@ def analyze_videos(all_images, fps):
             n_frames = frames.shape[0]
             vid_descriptions = []
 
-            # Sample keyframes at key positions
-            positions = [0.0, 0.25, 0.5, 0.75, 1.0]
+            # Sample keyframes at preset positions
             for pos_idx, pos in enumerate(positions):
                 frame_idx = min(int(pos * (n_frames - 1)), n_frames - 1)
-                label = KEYFRAME_LABELS[pos_idx]
+                label = labels[pos_idx]
 
-                print(f"[VisionDirector] 🔍 Video {vid_idx}, {label} (frame {frame_idx}/{n_frames})...")
+                caption_count += 1
+                print(f"[VisionDirector] 🔍 [{caption_count}/{total_captions}] Video {vid_idx}, {label} (frame {frame_idx}/{n_frames})...")
                 try:
-                    caption = _caption_frame(model, processor, frames[frame_idx], dtype, device)
+                    caption = _caption_frame(
+                        model, processor, frames[frame_idx], dtype, device,
+                        task=caption_task, num_beams=num_beams, max_tokens=max_tokens
+                    )
                     vid_descriptions.append((label, caption))
                     print(f"[VisionDirector]    → {caption[:120]}...")
                 except Exception as e:
