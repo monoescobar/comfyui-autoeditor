@@ -20,7 +20,7 @@ from .ollama_bridge import list_ollama_models, ask_ollama, ask_ollama_with_descr
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.12.3"
+AUTOEDITOR_NODE_VERSION = "v2026.06.12.4"
 
 
 class DJ_AutoEditor:
@@ -48,7 +48,10 @@ class DJ_AutoEditor:
                 "video_info2": ("VHS_VIDEOINFO",),
             },
             "optional": {
-                # Pacing & transition overrides
+                "video_understanding": (["ON", "FAST", "OFF"], {
+                    "default": "FAST",
+                    "tooltip": "Controls Florence-2 video understanding. ON=best quality/slow, FAST=fewer keyframes, OFF=skip vision analysis.",
+                }),
                 # Source videos
                 "audio1": ("AUDIO",),
                 "audio2": ("AUDIO",),
@@ -970,9 +973,12 @@ class DJ_AutoEditor:
         enable_hold = False
         enable_jump_cuts = False
         enable_micro_ramp = False
-        enable_vision = True
+        video_understanding = str(kwargs.get("video_understanding", "FAST")).upper()
+        if video_understanding not in {"ON", "FAST", "OFF"}:
+            video_understanding = "FAST"
+        enable_vision = video_understanding != "OFF"
         quality_mode = "premium"
-        vision_quality = "detailed"
+        vision_quality = "detailed" if video_understanding == "ON" else "fast"
         distortion_mode = "skip_frames"
         enable_contrast_protect = True
         enable_phased = False
@@ -990,7 +996,8 @@ class DJ_AutoEditor:
 
         print(f"\n{'='*60}")
         print("[AutoEditor] AI DIRECTOR MODE: ALWAYS ON")
-        print("[AutoEditor] The node will analyze the footage, choose the mood/edit plan, and apply professional settings.")
+        print("[AutoEditor] The node will choose the mood/edit plan and apply professional settings.")
+        print(f"[AutoEditor] Video understanding: {video_understanding} ({'Florence-2 ' + vision_quality if enable_vision else 'skipped'})")
         if llm_prompt and llm_prompt.strip():
             print(f"[AutoEditor] Creative direction: \"{llm_prompt.strip()[:140]}\"")
         else:
@@ -1083,7 +1090,7 @@ class DJ_AutoEditor:
                 traceback.print_exc()
                 vision_descriptions = None
         else:
-            vision_error = "Vision analysis is disabled (toggle is OFF)"
+            vision_error = "Vision analysis is disabled (video_understanding=OFF)"
 
         # ── Log source video info ─────────────────────────────────────────
         total_source_frames = 0
@@ -1124,7 +1131,8 @@ class DJ_AutoEditor:
         if mood == "llm_auto":
             config = self._get_llm_config(
                 llm_model, llm_prompt, video_summary_lines, all_images,
-                vision_context=vision_context
+                vision_context=vision_context,
+                allow_keyframe_fallback=enable_vision,
             )
         else:
             config = MOODS.get(mood, MOODS["bold"]).copy()
@@ -1815,7 +1823,7 @@ class DJ_AutoEditor:
         return config
 
     def _get_llm_config(self, llm_model, llm_prompt, video_summary_lines, all_images,
-                        vision_context=""):
+                        vision_context="", allow_keyframe_fallback=True):
         """Ask the LLM for editing configuration.
         If vision_context is provided, uses text-only mode (Florence-2 descriptions).
         Otherwise falls back to sending keyframe images."""
@@ -1853,6 +1861,19 @@ class DJ_AutoEditor:
                     print(f"[AutoEditor]   {k}: {v}")
                 return config
             print(f"[AutoEditor] ⚠️ Vision-directed query failed — falling back to image mode")
+
+        if not allow_keyframe_fallback:
+            print("[AutoEditor] Video understanding OFF - using text-only LLM direction")
+            config = ask_ollama(llm_model, llm_prompt, video_info_str)
+            if config is None:
+                print("[AutoEditor] Text-only LLM returned no valid config - using premium fallback director config")
+                return self._professional_fallback_config()
+            if "cut_pattern" not in config:
+                config["cut_pattern"] = "1,2,3,4,5,6"
+            print(f"[AutoEditor] 🤖 LLM config received (text-only):")
+            for k, v in config.items():
+                print(f"[AutoEditor]   {k}: {v}")
+            return config
 
         # ── FALLBACK: Send keyframe images to multimodal LLM ──────────────
         keyframe_tensors = []
