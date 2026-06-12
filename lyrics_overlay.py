@@ -13,7 +13,7 @@ from .text_renderer import TextRenderer, DISPLAY_STYLES, LINE_MODES, POSITIONS
 from .ollama_bridge import list_ollama_models
 
 
-LYRICS_OVERLAY_NODE_VERSION = "v2026.06.12.2"
+LYRICS_OVERLAY_NODE_VERSION = "v2026.06.12.3"
 
 
 class DJ_LyricsOverlay:
@@ -217,15 +217,13 @@ class DJ_LyricsOverlay:
         print(f"\n[LyricsOverlay] Step 3/3: Rendering '{config['display_style']}' on {n_frames} frames...")
         renderer = TextRenderer(config)
 
-        output_frames = []
+        result = torch.empty_like(video_frames)
         for i in range(n_frames):
             timestamp = i / fps
             rendered = renderer.render_frame(video_frames[i], timestamp, aligned, bpm)
-            output_frames.append(rendered)
+            result[i].copy_(rendered)
             if (i + 1) % 100 == 0 or i == n_frames - 1:
                 print(f"[LyricsOverlay]   Frame {i+1}/{n_frames} ({(i+1)/n_frames*100:.0f}%)")
-
-        result = torch.stack(output_frames, dim=0)
 
         # ── Build report ─────────────────────────────────────────────
         report = self._build_report(aligned, bpm, config, n_frames, fps)

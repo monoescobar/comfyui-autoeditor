@@ -7,6 +7,7 @@ import os
 import math
 import urllib.request
 import numpy as np
+import torch
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 # Font download URLs (Google Fonts GitHub)
@@ -361,8 +362,7 @@ class TextRenderer:
     # ── Main render entry point ──────────────────────────────────────
 
     def render_frame(self, frame_tensor, timestamp, aligned_lyrics, bpm=120.0):
-        frame_np = frame_tensor.cpu().numpy()
-        h, w = frame_np.shape[:2]
+        h, w = frame_tensor.shape[:2]
 
         # Transform lyrics based on line_display mode
         display_lyrics = self._prepare_display_lyrics(aligned_lyrics)
@@ -382,11 +382,20 @@ class TextRenderer:
         style_fn = getattr(self, f"_style_{self.style}", self._style_subtitles)
         style_fn(overlay, draw, ctx)
 
-        frame_img = Image.fromarray((frame_np * 255).clip(0, 255).astype(np.uint8)).convert("RGBA")
+        frame_u8 = (
+            frame_tensor.detach()
+            .clamp(0, 1)
+            .mul(255)
+            .to(dtype=torch.uint8, device="cpu")
+            .contiguous()
+        )
+        frame_img = Image.fromarray(frame_u8.numpy()).convert("RGBA")
         composited = Image.alpha_composite(frame_img, overlay)
-        result = np.array(composited.convert("RGB")).astype(np.float32) / 255.0
-        import torch
-        return torch.from_numpy(result)
+        rgb = composited.convert("RGB")
+        result_u8 = torch.from_numpy(np.array(rgb, dtype=np.uint8, copy=True))
+        result = result_u8.to(device=frame_tensor.device, dtype=frame_tensor.dtype)
+        result.div_(255.0)
+        return result
 
     # ── Style 1: Karaoke ─────────────────────────────────────────────
 
