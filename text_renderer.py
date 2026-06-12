@@ -333,15 +333,9 @@ class TextRenderer:
             mid = (lo + hi) // 2
             line = lyrics[mid]
 
-            # Compute grace: small tail after line_end, clamped to gap
-            grace = 0.15
-            if mid + 1 < len(lyrics):
-                gap = lyrics[mid + 1]["line_start"] - line["line_end"]
-                grace = min(grace, max(gap * 0.1, 0.0))
-
             if timestamp < line["line_start"]:
                 hi = mid - 1
-            elif timestamp > line["line_end"] + grace:
+            elif timestamp > line["line_end"]:
                 lo = mid + 1
             else:
                 current_line = mid
@@ -352,12 +346,25 @@ class TextRenderer:
 
         # Find current word within line (linear scan — lines are short)
         line = lyrics[current_line]
-        current_word = 0
+        current_word = None
         for wi, w in enumerate(line["words"]):
+            if w["start"] <= timestamp <= w["end"]:
+                current_word = wi
+                break
             if w["start"] <= timestamp:
                 current_word = wi
 
         return current_line, current_word
+
+    def _visible_word_items(self, line, timestamp):
+        """Words that are allowed onscreen: never show words before their start."""
+        if timestamp < line["line_start"] or timestamp > line["line_end"]:
+            return []
+        return [
+            (idx, word_info)
+            for idx, word_info in enumerate(line["words"])
+            if timestamp >= word_info["start"]
+        ]
 
     # ── Main render entry point ──────────────────────────────────────
 
@@ -369,6 +376,8 @@ class TextRenderer:
 
         line_idx, word_idx = self._find_position(timestamp, display_lyrics)
         if line_idx is None:
+            return frame_tensor
+        if not self._visible_word_items(display_lyrics[line_idx], timestamp):
             return frame_tensor
 
         overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
@@ -401,7 +410,8 @@ class TextRenderer:
 
     def _style_karaoke(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        words = [w["word"] for w in line["words"]]
+        visible_items = self._visible_word_items(line, ctx["timestamp"])
+        words = [w["word"] for _, w in visible_items]
         sizes = self._measure_words(words)
         if not sizes:
             return
@@ -410,10 +420,9 @@ class TextRenderer:
         y = self._get_y_base(ctx["h"], text_h, n_rows)
         positions = self._word_positions(words, sizes, ctx["w"], y)
 
-        for i, (word, pos) in enumerate(zip(words, positions)):
+        for (original_idx, w_info), word, pos in zip(visible_items, words, positions):
             if pos is None:
                 continue
-            w_info = line["words"][i]
             if ctx["timestamp"] >= w_info["end"]:
                 # Already sung — highlight color, slightly dimmed
                 color = self.highlight_color
@@ -433,7 +442,8 @@ class TextRenderer:
 
     def _style_subtitles(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        words = [w["word"] for w in line["words"]]
+        visible_items = self._visible_word_items(line, ctx["timestamp"])
+        words = [w["word"] for _, w in visible_items]
         sizes = self._measure_words(words)
         if not sizes:
             return
@@ -451,10 +461,9 @@ class TextRenderer:
             line_alpha = int(255 * (line["line_end"] - t) / fade_dur)
         line_alpha = max(0, min(255, line_alpha))
 
-        for i, (word, pos) in enumerate(zip(words, positions)):
+        for (original_idx, w_info), word, pos in zip(visible_items, words, positions):
             if pos is None:
                 continue
-            w_info = line["words"][i]
             if t >= w_info["end"]:
                 # Already sung
                 color = self.highlight_color
@@ -507,18 +516,11 @@ class TextRenderer:
 
     def _style_typewriter(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        words = [w["word"] for w in line["words"]]
-        sizes = self._measure_words(words)
-        if not sizes:
+        visible_items = self._visible_word_items(line, ctx["timestamp"])
+        visible_words = [w["word"] for _, w in visible_items]
+        visible_sizes = self._measure_words(visible_words)
+        if not visible_sizes:
             return
-
-        # Determine how many words are visible based on time progress
-        line_dur = line["line_end"] - line["line_start"]
-        elapsed = ctx["timestamp"] - line["line_start"]
-        progress = max(0, min(1, elapsed / max(line_dur, 0.01)))
-        n_visible = max(1, int(progress * len(words) + 0.5))
-        visible_words = words[:n_visible]
-        visible_sizes = sizes[:n_visible]
 
         text_h = max(s[1] for s in visible_sizes)
         n_rows = self._get_wrapped_row_count(visible_words, visible_sizes, ctx["w"])
@@ -543,7 +545,8 @@ class TextRenderer:
 
     def _style_word_wave(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        words = [w["word"] for w in line["words"]]
+        visible_items = self._visible_word_items(line, ctx["timestamp"])
+        words = [w["word"] for _, w in visible_items]
         sizes = self._measure_words(words)
         if not sizes:
             return
@@ -554,32 +557,28 @@ class TextRenderer:
 
         beat_dur = 60.0 / max(ctx["bpm"], 60)
 
-        for i, (word, pos) in enumerate(zip(words, positions)):
+        for (original_idx, w_info), word, pos in zip(visible_items, words, positions):
             if pos is None:
                 continue
-            w_info = line["words"][i]
             wave_phase = (ctx["timestamp"] - w_info["start"]) / beat_dur * math.pi * 2
             if ctx["timestamp"] >= w_info["start"] and ctx["timestamp"] <= w_info["end"] + 0.3:
                 offset_y = int(-15 * abs(math.sin(wave_phase)))
                 color = self.highlight_color
                 alpha = 255
             elif ctx["timestamp"] >= w_info["end"]:
-                dist = abs(i - (ctx["word_idx"] or 0))
+                dist = abs(original_idx - (ctx["word_idx"] or 0))
                 delayed_phase = wave_phase - dist * 0.5
                 offset_y = int(-8 * max(0, math.sin(delayed_phase)))
                 color = self.highlight_color
                 alpha = 180
-            else:
-                offset_y = 0
-                color = self.text_color
-                alpha = 100
             self._draw_text(draw, word, pos[0], pos[1] + offset_y, color, alpha)
 
     # ── Style 6: Glow Pulse ──────────────────────────────────────────
 
     def _style_glow_pulse(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        words = [w["word"] for w in line["words"]]
+        visible_items = self._visible_word_items(line, ctx["timestamp"])
+        words = [w["word"] for _, w in visible_items]
         sizes = self._measure_words(words)
         if not sizes:
             return
@@ -594,8 +593,9 @@ class TextRenderer:
         glow_overlay = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
         glow_draw = ImageDraw.Draw(glow_overlay)
 
-        for i, (word, pos) in enumerate(zip(words, positions)):
-            w_info = line["words"][i]
+        for (original_idx, w_info), word, pos in zip(visible_items, words, positions):
+            if pos is None:
+                continue
             is_active = w_info["start"] <= ctx["timestamp"] <= w_info["end"] + 0.2
             if is_active:
                 pulse = 0.5 + 0.5 * math.sin(ctx["timestamp"] / beat_dur * math.pi * 4)
@@ -605,8 +605,6 @@ class TextRenderer:
                 color = self.highlight_color
             elif ctx["timestamp"] > w_info["end"]:
                 color = (*self.text_color[:3], 200)
-            else:
-                color = (*self.text_color[:3], 140)
             self._draw_text(draw, word, pos[0], pos[1], color)
 
         blurred = glow_overlay.filter(ImageFilter.GaussianBlur(radius=8))
@@ -617,7 +615,8 @@ class TextRenderer:
 
     def _style_slide_in(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        words = [w["word"] for w in line["words"]]
+        visible_items = self._visible_word_items(line, ctx["timestamp"])
+        words = [w["word"] for _, w in visible_items]
         sizes = self._measure_words(words)
         if not sizes:
             return
@@ -675,39 +674,26 @@ class TextRenderer:
         lyrics = ctx["lyrics"]
         li = ctx["line_idx"]
         text_h = self.font.getbbox("Ay")[3] - self.font.getbbox("Ay")[1]
-        line_spacing = text_h + 15
-
-        lines_to_show = []
-        if self.line_mode == "three_lines" and li > 0:
-            lines_to_show.append((li - 1, 0.3))
-        lines_to_show.append((li, 1.0))
-        if li + 1 < len(lyrics):
-            lines_to_show.append((li + 1, 0.4))
-
-        n_display = len(lines_to_show)
-        y_base = self._get_y_base(ctx["h"], text_h, n_display)
-
-        for idx, (show_li, base_alpha) in enumerate(lines_to_show):
-            line = lyrics[show_li]
-            words = [w["word"] for w in line["words"]]
-            sizes = self._measure_words(words)
-            if not sizes:
+        line = lyrics[li]
+        visible_items = self._visible_word_items(line, ctx["timestamp"])
+        words = [w["word"] for _, w in visible_items]
+        sizes = self._measure_words(words)
+        if not sizes:
+            return
+        n_rows = self._get_wrapped_row_count(words, sizes, ctx["w"])
+        y = self._get_y_base(ctx["h"], text_h, n_rows)
+        positions = self._word_positions(words, sizes, ctx["w"], y)
+        for word, pos in zip(words, positions):
+            if pos is None:
                 continue
-            n_rows = self._get_wrapped_row_count(words, sizes, ctx["w"])
-            row_y = y_base + idx * line_spacing
-            positions = self._word_positions(words, sizes, ctx["w"], row_y)
-            alpha = int(255 * base_alpha)
-            color = self.highlight_color if show_li == li else self.text_color
-            for word, pos in zip(words, positions):
-                if pos is None:
-                    continue
-                self._draw_text(draw, word, pos[0], pos[1], color, alpha)
+            self._draw_text(draw, word, pos[0], pos[1], self.highlight_color, 255)
 
     # ── Style 10: Neon Flash ─────────────────────────────────────────
 
     def _style_neon_flash(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        words = [w["word"] for w in line["words"]]
+        visible_items = self._visible_word_items(line, ctx["timestamp"])
+        words = [w["word"] for _, w in visible_items]
         sizes = self._measure_words(words)
         if not sizes:
             return
@@ -720,7 +706,9 @@ class TextRenderer:
         for blur_pass in [12, 6]:
             glow = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
             gd = ImageDraw.Draw(glow)
-            for i, (word, pos) in enumerate(zip(words, positions)):
+            for word, pos in zip(words, positions):
+                if pos is None:
+                    continue
                 ga = 60 if blur_pass == 12 else 100
                 gc = (*self.highlight_color[:3], ga)
                 gd.text((pos[0], pos[1]), word, font=self.font, fill=gc)
@@ -730,12 +718,13 @@ class TextRenderer:
         # Recreate draw since overlay pixels changed
         draw = ImageDraw.Draw(overlay)
 
-        for i, (word, pos) in enumerate(zip(words, positions)):
-            w_info = line["words"][i]
+        for (original_idx, w_info), word, pos, size in zip(visible_items, words, positions, sizes):
+            if pos is None:
+                continue
             is_new = w_info["start"] <= ctx["timestamp"] <= w_info["start"] + 0.1
             if is_new:
                 # Flash burst
-                sw, sh = sizes[i]
+                sw, sh = size
                 flash = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
                 fd = ImageDraw.Draw(flash)
                 fc = (255, 255, 255, 200)
@@ -744,8 +733,6 @@ class TextRenderer:
                 combined = Image.alpha_composite(overlay, flash)
                 overlay.paste(combined, (0, 0), combined)
                 color = (255, 255, 255, 255)
-            elif ctx["timestamp"] >= w_info["start"]:
-                color = self.highlight_color
             else:
-                color = (*self.text_color[:3], 180)
+                color = self.highlight_color
             self._draw_text(draw, word, pos[0], pos[1], color)

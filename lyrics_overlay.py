@@ -13,7 +13,8 @@ from .text_renderer import TextRenderer, DISPLAY_STYLES, LINE_MODES, POSITIONS
 from .ollama_bridge import list_ollama_models
 
 
-LYRICS_OVERLAY_NODE_VERSION = "v2026.06.12.3"
+LYRICS_OVERLAY_NODE_VERSION = "v2026.06.12.4"
+LYRICS_FONT_SCALE = 0.85
 
 
 class DJ_LyricsOverlay:
@@ -214,6 +215,8 @@ class DJ_LyricsOverlay:
             print(f"\n[LyricsOverlay] Step 2/3: Using manual style settings")
 
         # ── Step 3: Render text on frames ────────────────────────────
+        config = self._normalize_config(config)
+
         print(f"\n[LyricsOverlay] Step 3/3: Rendering '{config['display_style']}' on {n_frames} frames...")
         renderer = TextRenderer(config)
 
@@ -249,6 +252,12 @@ class DJ_LyricsOverlay:
             "text_shadow": kwargs.get("text_shadow", "enable"),
             "line_display": kwargs.get("line_display", "single_line"),
         }
+
+    def _normalize_config(self, config):
+        config = dict(config)
+        raw_size = int(config.get("font_size", 42))
+        config["font_size"] = max(16, int(round(raw_size * LYRICS_FONT_SCALE)))
+        return config
 
     def _build_report(self, aligned, bpm, config, n_frames, fps):
         r = []
