@@ -10,6 +10,30 @@ import torch
 import torch.nn.functional as F
 
 
+MAX_POSTPROCESS_ELEMENTS = 12_000_000
+
+
+def _run_in_frame_batches(frames, fn, label):
+    """Apply a post-process function without creating huge full-video temporaries."""
+    if not torch.is_tensor(frames) or frames.ndim < 4 or frames.shape[0] <= 1:
+        return fn(frames)
+
+    per_frame_elements = max(1, frames[0].numel())
+    batch_size = max(1, MAX_POSTPROCESS_ELEMENTS // per_frame_elements)
+    if batch_size >= frames.shape[0]:
+        return fn(frames)
+
+    print(
+        f"[AutoEditor] Memory-safe {label}: "
+        f"{frames.shape[0]} frames in batches of {batch_size}"
+    )
+    result = torch.empty_like(frames)
+    for start in range(0, frames.shape[0], batch_size):
+        end = min(start + batch_size, frames.shape[0])
+        result[start:end] = fn(frames[start:end])
+    return result
+
+
 # ─── Core adjustment functions ────────────────────────────────────────────────
 
 def _brightness(frames, offset):
@@ -341,8 +365,8 @@ def apply_visual_effects(frames, effects_list):
     for effect_name in effects_list:
         fn = VISUAL_EFFECTS.get(effect_name)
         if fn:
-            frames = fn(frames)
-            print(f"[AutoEditor] ✨ Applied: {effect_name}")
+            frames = _run_in_frame_batches(frames, fn, effect_name)
+            print(f"[AutoEditor] Applied: {effect_name}")
     return frames
 
 
@@ -369,7 +393,7 @@ def apply_color_grade(frames, grade_name):
     fn = GRADE_FUNCTIONS.get(grade_name)
     if fn is None:
         return frames
-    return fn(frames)
+    return _run_in_frame_batches(frames, fn, f"color grade '{grade_name}'")
 
 
 def get_grade_names():

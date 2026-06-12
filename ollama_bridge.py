@@ -128,6 +128,8 @@ DIRECTOR BRIEF:
 2. Use that mood as the base edit language, then adapt it using the user's prompt.
 3. If there is no prompt, infer the best mood from the product, lighting, motion, and shot quality.
 4. The edit must make the product look desirable, real, premium, and easy to buy.
+5. The user's prompt is ADDITIVE DIRECTION. It should refine and elevate your chosen mood, not replace the mood.
+6. Think like a commercial director: build hook -> product proof/detail -> emotional desire -> hero ending.
 
 PROFESSIONAL EDITING PRINCIPLES:
 1. Editing should feel intentional and mostly invisible. Avoid random effects that call attention to the edit instead of the product.
@@ -205,7 +207,7 @@ ALL PARAMETERS (include EVERY key in your JSON response):
 19. "hold_frame_chance": float 0.0-0.12
 20. "micro_ramp_chance": float 0.0-0.25
 21. "contrast_protect": boolean true/false — enable soft contrast protection (recommend true)
-22. "edit_narrative": A 3-5 sentence PERSONAL explanation of your creative vision. Explain WHY you chose this pacing, these fragments, this energy level. What story are you telling? What emotion should the viewer feel? Write as a creative director explaining their vision to a client.
+22. "edit_narrative": A 3-5 sentence PERSONAL explanation of your creative vision. Explain the chosen mood, how the user's prompt modified it, the hook, the middle proof/detail section, and the hero ending. Write as a creative director explaining their vision to a client.
 
 RESPOND WITH ONLY A VALID JSON OBJECT. No markdown, no explanation outside the JSON."""
 
@@ -455,7 +457,9 @@ PROFESSIONAL EDITING RULES:
 4. INTERLEAVE videos creatively — contrast wide with close-up, static with motion.
 5. Editing should feel intentional and mostly invisible. Avoid random effects that call attention away from the product.
 6. Vary shot lengths musically, but do not make the whole edit frantic. Use short accents around motion/reveals and longer breathing cuts on product hero shots.
-7. Each transition serves a purpose:
+7. The user's prompt is ADDITIVE DIRECTION. It should refine and elevate your chosen mood, not replace the mood.
+8. Build a commercial arc: hook -> product proof/detail -> emotional desire -> hero ending.
+9. Each transition serves a purpose:
    - hard_cut: Clean, sharp. Use for matching motion or rhythm.
    - flash_white: Energy burst. Use sparingly at key product reveals.
    - flash_black: Dramatic weight. Use rarely; too much feels choppy.
@@ -465,7 +469,7 @@ PROFESSIONAL EDITING RULES:
    - luma_fade: Luxury premium reveal through brightness.
    - glitch_cut: Digital edge. Only for tech/gaming/intentional style.
    - shake_cut: Camera impact. Use rarely.
-8. Choose color grades that enhance the PRODUCT and preserve real material detail.
+10. Choose color grades that enhance the PRODUCT and preserve real material detail.
 
 CRITICAL CONTRAST RULES:
 - NEVER use "high_contrast" — it crushed blacks and looks harsh.
@@ -482,7 +486,7 @@ CONTENT-DRIVEN RHYTHM:
 - variable_durations should show polished variation: "1.0,2.6,0.8,1.6,3.0,0.9,2.2,1.2,3.5"
 - NEVER use uniform cut lengths — that looks robotic.
 
-9. Visual effects must be restrained: bloom, film_grain, contrast_protect are usually enough. Use chromatic aberration lightly.
+11. Visual effects must be restrained: bloom, film_grain, contrast_protect are usually enough. Use chromatic aberration lightly.
 
 ALL PARAMETERS (include EVERY key in your JSON):
 
@@ -510,7 +514,7 @@ ALL PARAMETERS (include EVERY key in your JSON):
 19. "hold_frame_chance": float 0.0-0.12
 20. "micro_ramp_chance": float 0.0-0.25
 21. "contrast_protect": boolean true/false (recommend true)
-22. "edit_narrative": 3-5 sentences explaining your creative vision. Reference SPECIFIC shots from the analysis. Example: "I'm leading with Video 1's hero bottle shot because it has the strongest lighting, then cutting to Video 3's spray action for energy..."
+22. "edit_narrative": 3-5 sentences explaining your creative vision. Reference SPECIFIC shots from the analysis. Explain the chosen mood, how the user's prompt modified it, the hook, the middle proof/detail section, and the hero ending.
 
 RESPOND WITH ONLY A VALID JSON OBJECT."""
 

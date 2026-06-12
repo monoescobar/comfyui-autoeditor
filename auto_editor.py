@@ -344,6 +344,195 @@ class DJ_AutoEditor:
         s = comfy.utils.common_upscale(s, target_w, target_h, "bilinear", "center")
         return s.permute(0, 2, 3, 1)
 
+    @staticmethod
+    def _premium_memory_budget(fps, height, width):
+        """Return conservative output limits for premium mode."""
+        bytes_per_frame = max(1, height * width * 3 * 4)
+        memory_frame_cap = max(96, int(3_500_000_000 // bytes_per_frame))
+        max_duration_cap = int(max(1, fps) * 45)
+        max_frames = max(24, min(memory_frame_cap, max_duration_cap, 900))
+        return {
+            "quality_mode": "premium",
+            "max_output_frames": max_frames,
+            "max_output_seconds": max_frames / max(1, fps),
+            "bytes_per_frame": bytes_per_frame,
+        }
+
+    @staticmethod
+    def _score_source_videos(all_images, vision_descriptions=None):
+        """Score each source for sharpness, exposure, stability, and product cues."""
+        product_words = (
+            "product", "bottle", "box", "package", "packaging", "label",
+            "logo", "close-up", "closeup", "hand", "face", "model", "wearing",
+            "spray", "cream", "device", "phone", "shoe", "bag", "watch",
+        )
+        scores = {}
+        details = {}
+
+        for idx, frames in all_images.items():
+            n = frames.shape[0]
+            if n <= 0:
+                scores[idx] = 0.0
+                details[idx] = "empty source"
+                continue
+
+            sample_n = min(12, n)
+            sample_idx = torch.linspace(0, n - 1, sample_n).long()
+            sample = frames[sample_idx].float()
+
+            luminance = (
+                sample[..., 0:1] * 0.299
+                + sample[..., 1:2] * 0.587
+                + sample[..., 2:3] * 0.114
+            )
+            brightness = luminance.mean().item()
+            exposure_score = max(0.0, 1.0 - abs(brightness - 0.55) / 0.55)
+            contrast_score = min(1.0, luminance.std().item() * 3.5)
+
+            if sample.shape[1] > 1 and sample.shape[2] > 1:
+                edge_x = (sample[:, :, 1:, :] - sample[:, :, :-1, :]).abs().mean().item()
+                edge_y = (sample[:, 1:, :, :] - sample[:, :-1, :, :]).abs().mean().item()
+                sharpness_score = min(1.0, (edge_x + edge_y) * 10.0)
+            else:
+                sharpness_score = 0.5
+
+            if sample_n > 1:
+                motion = (sample[1:] - sample[:-1]).abs().mean().item()
+                stability_score = max(0.0, min(1.0, 1.0 - motion * 3.0))
+            else:
+                stability_score = 0.7
+
+            caption_bonus = 0.0
+            if vision_descriptions and idx in vision_descriptions:
+                text = " ".join(c for _, c in vision_descriptions[idx]).lower()
+                cue_hits = sum(1 for word in product_words if word in text)
+                caption_bonus = min(0.25, cue_hits * 0.035)
+
+            score = (
+                exposure_score * 0.25
+                + contrast_score * 0.20
+                + sharpness_score * 0.30
+                + stability_score * 0.25
+                + caption_bonus
+            )
+            scores[idx] = max(0.0, min(1.0, score))
+            details[idx] = (
+                f"score={scores[idx]:.2f}, exposure={exposure_score:.2f}, "
+                f"detail={sharpness_score:.2f}, stability={stability_score:.2f}"
+            )
+
+        return scores, details
+
+    @staticmethod
+    def _commercial_chunk_score(chunk, source_scores, fps):
+        vid_idx, start, end = chunk
+        dur = max(0.0, (end - start) / max(1, fps))
+        if dur < 0.35:
+            duration_score = 0.35
+        elif dur <= 1.25:
+            duration_score = 0.80
+        elif dur <= 3.5:
+            duration_score = 1.0
+        else:
+            duration_score = 0.75
+        return source_scores.get(vid_idx, 0.5) * 0.75 + duration_score * 0.25
+
+    @classmethod
+    def _shape_premium_commercial_arc(cls, chunks, source_scores, fps, max_output_frames):
+        """Create hook -> variation -> product hero ending while respecting memory limits."""
+        if not chunks:
+            return [], {"trimmed": False, "reason": "no chunks"}
+
+        total_frames = sum(end - start for _, start, end in chunks)
+        scored = sorted(
+            chunks,
+            key=lambda c: cls._commercial_chunk_score(c, source_scores, fps),
+            reverse=True,
+        )
+
+        def chunk_frames(chunk):
+            return max(0, chunk[2] - chunk[1])
+
+        short_candidates = [
+            c for c in scored
+            if chunk_frames(c) <= int(max(1, fps) * 1.6)
+        ]
+        hook = short_candidates[0] if short_candidates else scored[0]
+        hero = scored[0]
+
+        selected = []
+        selected_keys = set()
+
+        def add_chunk(chunk, frame_budget):
+            key = tuple(chunk)
+            if key in selected_keys:
+                return frame_budget
+            n = chunk_frames(chunk)
+            if n <= 0:
+                return frame_budget
+            if n > frame_budget:
+                min_trim = min(frame_budget, max(4, int(max(1, fps) * 0.35)))
+                if frame_budget >= min_trim and frame_budget > 0:
+                    vid_idx, start, end = chunk
+                    trimmed = (vid_idx, start, min(end, start + frame_budget))
+                    selected.append(trimmed)
+                    selected_keys.add(tuple(trimmed))
+                    return 0
+                return frame_budget
+            selected.append(chunk)
+            selected_keys.add(key)
+            return frame_budget - n
+
+        ending_frames = chunk_frames(hero) if tuple(hero) != tuple(hook) else 0
+        budget = max_output_frames
+        if ending_frames and ending_frames < budget:
+            budget -= ending_frames
+
+        budget = add_chunk(hook, budget)
+
+        remaining = [c for c in chunks if tuple(c) not in selected_keys and tuple(c) != tuple(hero)]
+        weighted_remaining = sorted(
+            remaining,
+            key=lambda c: (
+                cls._commercial_chunk_score(c, source_scores, fps)
+                + random.random() * 0.18
+            ),
+            reverse=True,
+        )
+
+        for chunk in weighted_remaining:
+            if budget <= 0:
+                break
+            if selected and selected[-1][0] == chunk[0]:
+                alternatives = [c for c in weighted_remaining if tuple(c) not in selected_keys and c[0] != selected[-1][0]]
+                if alternatives:
+                    chunk = alternatives[0]
+            budget = add_chunk(chunk, budget)
+
+        if tuple(hero) not in selected_keys:
+            if chunk_frames(hero) <= budget:
+                budget = add_chunk(hero, budget)
+            elif selected:
+                weakest_i = min(
+                    range(len(selected)),
+                    key=lambda i: cls._commercial_chunk_score(selected[i], source_scores, fps),
+                )
+                if chunk_frames(hero) <= chunk_frames(selected[weakest_i]):
+                    selected_keys.discard(tuple(selected[weakest_i]))
+                    selected[weakest_i] = hero
+                    selected_keys.add(tuple(hero))
+
+        selected = cls._fix_consecutive(selected)
+        selected_frames = sum(chunk_frames(c) for c in selected)
+        return selected, {
+            "trimmed": selected_frames < total_frames,
+            "source_frames": total_frames,
+            "selected_frames": selected_frames,
+            "max_output_frames": max_output_frames,
+            "hook_video": hook[0],
+            "hero_video": hero[0],
+        }
+
     # ─── Fragmentation: chop a video into random-length chunks ───────────
 
     @staticmethod
@@ -639,10 +828,22 @@ class DJ_AutoEditor:
         enable_jump_cuts = True
         enable_micro_ramp = True
         enable_vision = True
-        vision_quality = "balanced"
+        quality_mode = "premium"
+        vision_quality = "detailed"
         distortion_mode = "freeze_frames"
         enable_contrast_protect = True
         enable_phased = False
+
+        stale_model_values = {"", "ON", "OFF", "(ollama offline)", "(no models found)"}
+        if not isinstance(llm_model, str) or llm_model in stale_model_values or llm_model.startswith("("):
+            fresh_models = list_ollama_models()
+            usable_models = [m for m in fresh_models if isinstance(m, str) and m not in stale_model_values and not m.startswith("(")]
+            if usable_models:
+                preferred = next((m for m in usable_models if m == "gemma4:latest"), usable_models[0])
+                print(f"[AutoEditor] Refreshed Ollama model: {llm_model!r} -> {preferred}")
+                llm_model = preferred
+            else:
+                print(f"[AutoEditor] Ollama model refresh found no usable models: {fresh_models}")
 
         print(f"\n{'='*60}")
         print("[AutoEditor] AI DIRECTOR MODE: ALWAYS ON")
@@ -763,6 +964,17 @@ class DJ_AutoEditor:
         for idx in all_images:
             all_images[idx] = self._match_resolution(all_images[idx], target_h, target_w)
 
+        memory_plan = self._premium_memory_budget(fps, target_h, target_w)
+        print(
+            f"[AutoEditor] Premium mode: max {memory_plan['max_output_frames']} frames "
+            f"({memory_plan['max_output_seconds']:.1f}s) at {target_w}x{target_h}"
+        )
+        source_scores, source_details = self._score_source_videos(
+            all_images, vision_descriptions
+        )
+        for idx in sorted(source_details):
+            print(f"[AutoEditor] Source {idx} quality: {source_details[idx]}")
+
         # ── Get configuration ─────────────────────────────────────────────
         if mood == "llm_auto":
             config = self._get_llm_config(
@@ -773,8 +985,12 @@ class DJ_AutoEditor:
             config = MOODS.get(mood, MOODS["bold"]).copy()
             print(f"[AutoEditor] 🎭 Mood: '{mood}'")
 
+        config, director_notes = self._apply_premium_director_defaults(
+            config, llm_prompt, memory_plan
+        )
+
         # ── Apply pacing override ─────────────────────────────────────────
-        tweaks_applied = []
+        tweaks_applied = list(director_notes)
 
         PACING_PRESETS = {
             "as_mood": {"speed_mult": 1.0, "duration_mult": 1.0, "chunk_mult": 1.0},
@@ -927,6 +1143,23 @@ class DJ_AutoEditor:
 
         # Global shuffle across all videos
         shuffled_chunks = self._smart_shuffle(all_chunks, shuffle_intensity)
+        shuffled_chunks, arc_plan = self._shape_premium_commercial_arc(
+            shuffled_chunks, source_scores, fps, memory_plan["max_output_frames"]
+        )
+        if arc_plan.get("trimmed"):
+            print(
+                f"[AutoEditor] Premium memory guard selected "
+                f"{arc_plan['selected_frames']}/{arc_plan['source_frames']} frames "
+                f"for a safer commercial-length edit"
+            )
+            tweaks_applied.append(
+                f"Memory-safe commercial arc: selected {arc_plan['selected_frames']} "
+                f"of {arc_plan['source_frames']} candidate frames"
+            )
+        print(
+            f"[AutoEditor] Commercial arc: hook from video {arc_plan.get('hook_video', '?')}, "
+            f"hero ending from video {arc_plan.get('hero_video', '?')}"
+        )
 
         # ══════════════════════════════════════════════════════════════════
         # PHASE 3: BURST INSERTION (split long chunks into rapid sub-cuts)
@@ -1098,7 +1331,8 @@ class DJ_AutoEditor:
             all_images, shuffled_chunks, frame_segments,
             final_frames, final_duration, fps,
             target_w, target_h, total_source_frames,
-            tweaks_applied, features_on
+            tweaks_applied, features_on,
+            quality_mode, memory_plan, source_details, arc_plan
         )
 
         # ── Console summary ───────────────────────────────────────────────
@@ -1136,7 +1370,8 @@ class DJ_AutoEditor:
                       all_images, shuffled_chunks, frame_segments,
                       final_frames, final_duration, fps,
                       target_w, target_h, total_source_frames,
-                      tweaks_applied, features_on):
+                      tweaks_applied, features_on,
+                      quality_mode, memory_plan, source_details, arc_plan):
         r = []
         r.append("═" * 50)
         r.append("🎥 AUTO EDITOR — CREATIVE REPORT")
@@ -1147,9 +1382,10 @@ class DJ_AutoEditor:
         if mood == "llm_auto":
             r.append("⚠️ AI DIRECTOR MODE: ON")
             r.append("─" * 40)
-            r.append("All editing decisions were made automatically")
-            r.append("by the AI based on Florence-2 video analysis.")
-            r.append("Manual settings (mood, pacing, toggles) were IGNORED.")
+            r.append(f"Quality mode: {quality_mode.upper()} (always on)")
+            r.append(f"Chosen mood: {config.get('selected_mood', 'cinematic')}")
+            r.append("The prompt adds direction on top of the Auto Director's mood.")
+            r.append(f"Strategy: {config.get('edit_strategy', 'premium commercial arc')}")
             r.append("")
 
         # If LLM provided a narrative, use it prominently
@@ -1167,6 +1403,30 @@ class DJ_AutoEditor:
             r.append("🎨 EDITING STYLE")
             r.append("─" * 40)
             r.append(self.MOOD_DESCRIPTIONS.get(mood, f"Mode: {mood}"))
+            r.append("")
+
+        r.append("🎯 COMMERCIAL ARC")
+        r.append("─" * 40)
+        r.append(f"  Hook source: video {arc_plan.get('hook_video', '?')}")
+        r.append(f"  Hero ending source: video {arc_plan.get('hero_video', '?')}")
+        r.append(
+            f"  Memory budget: up to {memory_plan.get('max_output_frames', '?')} frames "
+            f"({memory_plan.get('max_output_seconds', 0):.1f}s)"
+        )
+        if arc_plan.get("trimmed"):
+            r.append(
+                f"  Safety selection: {arc_plan.get('selected_frames', '?')} "
+                f"of {arc_plan.get('source_frames', '?')} candidate frames"
+            )
+        else:
+            r.append("  Safety selection: all candidate frames fit the premium budget")
+        r.append("")
+
+        if source_details:
+            r.append("🔍 SOURCE QUALITY")
+            r.append("─" * 40)
+            for idx in sorted(source_details):
+                r.append(f"  Video {idx}: {source_details[idx]}")
             r.append("")
 
         # Tweaks
@@ -1225,13 +1485,99 @@ class DJ_AutoEditor:
         r.append("─" * 40)
         r.append(f"  {final_duration:.1f}s output from {total_source_dur:.1f}s of source footage")
         r.append(f"  {len(frame_segments)} cuts at {fps}fps • {target_w}×{target_h}")
-        r.append(f"  ✅ All frames from all {len(all_images)} videos used")
+        if arc_plan.get("trimmed"):
+            r.append("  Large source protected by memory-safe commercial selection")
+        else:
+            r.append(f"  All selected frames from all {len(all_images)} videos used")
         r.append("")
         r.append("═" * 50)
 
         return "\n".join(r)
 
     # ─── LLM config helper ───────────────────────────────────────────────
+
+    @staticmethod
+    def _apply_premium_director_defaults(config, llm_prompt, memory_plan):
+        """Premium is always on: make LLM settings safer, cleaner, and more commercial."""
+        config = dict(config or {})
+        notes = ["Quality mode: premium commercial director"]
+
+        config["quality_mode"] = "premium"
+        config["edit_strategy"] = "hook -> product proof/detail -> hero ending"
+        config["max_output_frames"] = memory_plan.get("max_output_frames")
+        config["max_output_seconds"] = memory_plan.get("max_output_seconds")
+
+        if config.get("color_grade") in ("none", "high_contrast"):
+            config["color_grade"] = "hollywood"
+            notes.append("Premium color safety: using hollywood grade instead of harsh/none")
+
+        transitions = config.get("transitions", [])
+        if isinstance(transitions, str):
+            transitions = [transitions]
+        polished_transitions = [
+            t for t in transitions
+            if t not in ("glitch_cut", "shake_cut", "flash_black")
+        ]
+        if not polished_transitions:
+            polished_transitions = [
+                "hard_cut", "cross_dissolve", "luma_fade", "zoom_punch_in"
+            ]
+            notes.append("Premium transitions: replaced noisy cuts with clean commercial transitions")
+        config["transitions"] = polished_transitions[:6]
+
+        vfx = config.get("visual_effects", [])
+        if isinstance(vfx, str):
+            vfx = [vfx]
+        vfx = [e for e in vfx if e not in ("heavy_vignette",)]
+        for required in ("bloom", "film_grain", "contrast_protect"):
+            if required not in vfx:
+                vfx.append(required)
+        config["visual_effects"] = vfx[:5]
+        config["contrast_protect"] = True
+
+        config["cut_duration_mode"] = "variable"
+        if not config.get("variable_durations"):
+            config["variable_durations"] = "0.9,2.4,1.1,1.7,3.0,0.8,2.1,1.3,3.4"
+
+        def clamp_float(key, lo, hi, default):
+            try:
+                value = float(config.get(key, default))
+            except (TypeError, ValueError):
+                value = default
+            config[key] = max(lo, min(hi, value))
+
+        clamp_float("min_chunk_duration", 0.55, 1.4, 0.8)
+        clamp_float("max_chunk_duration", max(config["min_chunk_duration"], 1.8), 4.2, 3.2)
+        clamp_float("shuffle_intensity", 0.25, 0.68, 0.48)
+        clamp_float("transition_intensity", 0.55, 0.9, 0.75)
+        clamp_float("reverse_chance", 0.0, 0.05, 0.0)
+        clamp_float("punch_in_chance", 0.08, 0.28, 0.18)
+        clamp_float("burst_frequency", 0.0, 0.18, 0.08)
+        clamp_float("black_breath_chance", 0.0, 0.02, 0.0)
+        clamp_float("hold_frame_chance", 0.0, 0.04, 0.0)
+        clamp_float("micro_ramp_chance", 0.0, 0.18, 0.10)
+
+        if config["max_chunk_duration"] < config["min_chunk_duration"]:
+            config["max_chunk_duration"] = config["min_chunk_duration"]
+
+        config["reverse_chance"] = 0.0
+        config["black_breath_chance"] = 0.0
+        config["hold_frame_chance"] = 0.0
+
+        narrative = config.get("edit_narrative", "")
+        if not narrative:
+            prompt_note = (
+                f" The user's extra direction is: {llm_prompt.strip()}"
+                if llm_prompt and llm_prompt.strip()
+                else ""
+            )
+            narrative = (
+                "Premium commercial director mode is building a clean persuasive arc: "
+                "open with the strongest hook, use the middle for product texture and proof, "
+                "and finish on the most desirable hero angle." + prompt_note
+            )
+        config["edit_narrative"] = str(narrative)
+        return config, notes
 
     @staticmethod
     def _professional_fallback_config():
