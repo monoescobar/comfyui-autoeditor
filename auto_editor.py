@@ -376,16 +376,38 @@ class DJ_AutoEditor:
         return s.permute(0, 2, 3, 1)
 
     @staticmethod
-    def _premium_memory_budget(fps, height, width):
-        """Return conservative output limits for premium mode."""
+    def _premium_memory_budget(fps, height, width, total_source_frames):
+        """Return output limits for premium mode without crushing normal ads."""
+        fps = max(1, float(fps))
+        total_source_frames = max(1, int(total_source_frames))
         bytes_per_frame = max(1, height * width * 3 * 4)
         memory_frame_cap = max(96, int(3_500_000_000 // bytes_per_frame))
-        max_duration_cap = int(max(1, fps) * 45)
-        max_frames = max(24, min(memory_frame_cap, max_duration_cap, 900))
+
+        standard_tiktok_frames = int(fps * 30)
+        min_sales_frames = min(total_source_frames, int(max(fps * 12, total_source_frames * 0.75)))
+
+        if total_source_frames <= standard_tiktok_frames:
+            max_frames = total_source_frames
+            guard_mode = "full_source_for_standard_tiktok_ad"
+        else:
+            preferred_cap = min(total_source_frames, int(fps * 45))
+            if memory_frame_cap < min_sales_frames:
+                max_frames = min_sales_frames
+                guard_mode = "sales_duration_floor_over_memory_cap"
+            else:
+                max_frames = max(min_sales_frames, min(memory_frame_cap, preferred_cap))
+                guard_mode = "memory_safe_long_source"
+
         return {
             "quality_mode": "premium",
             "max_output_frames": max_frames,
-            "max_output_seconds": max_frames / max(1, fps),
+            "min_output_frames": min_sales_frames,
+            "min_output_seconds": min_sales_frames / fps,
+            "max_output_seconds": max_frames / fps,
+            "source_frames": total_source_frames,
+            "source_seconds": total_source_frames / fps,
+            "memory_frame_cap": memory_frame_cap,
+            "guard_mode": guard_mode,
             "bytes_per_frame": bytes_per_frame,
         }
 
@@ -1073,10 +1095,12 @@ class DJ_AutoEditor:
         for idx in all_images:
             all_images[idx] = self._match_resolution(all_images[idx], target_h, target_w)
 
-        memory_plan = self._premium_memory_budget(fps, target_h, target_w)
+        memory_plan = self._premium_memory_budget(fps, target_h, target_w, total_source_frames)
         print(
-            f"[AutoEditor] Premium mode: max {memory_plan['max_output_frames']} frames "
-            f"({memory_plan['max_output_seconds']:.1f}s) at {target_w}x{target_h}"
+            f"[AutoEditor] Premium mode: {memory_plan['guard_mode']} | "
+            f"source {memory_plan['source_seconds']:.1f}s, target "
+            f"{memory_plan['min_output_seconds']:.1f}-{memory_plan['max_output_seconds']:.1f}s "
+            f"at {target_w}x{target_h}"
         )
         source_scores, source_details = self._score_source_videos(
             all_images, vision_descriptions
@@ -1374,6 +1398,22 @@ class DJ_AutoEditor:
         transitions_list = config.get("transitions", ["hard_cut"])
         cfg_transition_frames = config.get("transition_frames", 5)
         effective_transition_intensity = config.get("transition_intensity", 1.0)
+        min_output_frames = int(memory_plan.get("min_output_frames", 0))
+        selected_segment_frames = sum(seg.shape[0] for seg in frame_segments)
+        transition_count = max(0, len(frame_segments) - 1)
+        if transition_count and min_output_frames > 0:
+            max_allowed_loss = max(0, selected_segment_frames - min_output_frames)
+            max_overlap_each = max_allowed_loss // transition_count
+            if cfg_transition_frames > max_overlap_each:
+                old_transition_frames = cfg_transition_frames
+                cfg_transition_frames = max(0, int(max_overlap_each))
+                print(
+                    f"[AutoEditor] Duration guard reduced transition frames "
+                    f"{old_transition_frames} -> {cfg_transition_frames}"
+                )
+                tweaks_applied.append(
+                    f"Duration guard: transitions reduced {old_transition_frames}->{cfg_transition_frames} frames"
+                )
 
         print(f"[AutoEditor] Joining {len(frame_segments)} segments with transitions...")
         combined_frames = frame_segments[0]
@@ -1533,9 +1573,12 @@ class DJ_AutoEditor:
         r.append("─" * 40)
         r.append(f"  Hook source: video {arc_plan.get('hook_video', '?')}")
         r.append(f"  Hero ending source: video {arc_plan.get('hero_video', '?')}")
+        r.append(f"  Guard mode: {memory_plan.get('guard_mode', 'unknown')}")
         r.append(
-            f"  Memory budget: up to {memory_plan.get('max_output_frames', '?')} frames "
-            f"({memory_plan.get('max_output_seconds', 0):.1f}s)"
+            f"  Target duration: {memory_plan.get('min_output_seconds', 0):.1f}s - "
+            f"{memory_plan.get('max_output_seconds', 0):.1f}s "
+            f"({memory_plan.get('min_output_frames', '?')}-"
+            f"{memory_plan.get('max_output_frames', '?')} frames)"
         )
         if arc_plan.get("trimmed"):
             r.append(
