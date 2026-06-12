@@ -531,3 +531,107 @@ RESPOND WITH ONLY A VALID JSON OBJECT."""
     except Exception as e:
         print(f"[AutoEditor-LLM] ❌ Ollama error: {e}")
         return None
+
+
+def ask_ollama_lyrics_style(model, lyrics_text, bpm):
+    """
+    Ask Ollama to auto-pick lyrics overlay style based on song content.
+
+    Returns dict with display_style, colors, font, position, etc.
+    """
+    available_styles = [
+        "karaoke", "subtitles", "word_pop", "typewriter", "word_wave",
+        "glow_pulse", "slide_in", "bounce_drop", "fade_flow", "neon_flash",
+    ]
+    available_fonts = [
+        "arial", "impact", "roboto", "montserrat", "bebas_neue",
+        "comic_sans", "times", "courier",
+    ]
+    available_positions = ["top", "upper_third", "center", "lower_third", "bottom"]
+    available_backgrounds = ["none", "solid_bar", "gradient_bar", "rounded_box", "blur_box", "shadow_only"]
+    available_line_modes = ["single_line", "two_lines", "three_lines", "word_by_word", "full_verse"]
+
+    # Truncate lyrics for prompt efficiency
+    lyrics_preview = lyrics_text[:800] if len(lyrics_text) > 800 else lyrics_text
+
+    system = f"""You are a TikTok creative director specializing in viral music content. Choose the perfect text overlay style for song lyrics on a TikTok video.
+
+SONG INFO:
+- BPM: {bpm}
+- Lyrics preview:
+{lyrics_preview}
+
+STYLE OPTIONS:
+1. karaoke — Words highlight as sung (classic sing-along)
+2. subtitles — Clean lines appear/disappear (professional)
+3. word_pop — Words pop in with bounce (viral TikTok style)
+4. typewriter — Characters type in synced (ASMR/aesthetic)
+5. word_wave — Words bounce in wave pattern (fun/playful)
+6. glow_pulse — Active words glow and pulse (neon/night)
+7. slide_in — Lines slide from sides (dynamic/energetic)
+8. bounce_drop — Words drop from above (upbeat/playful)
+9. fade_flow — Smooth crossfade between lines (chill/ambient)
+10. neon_flash — Neon glow with flash bursts (EDM/club)
+
+Choose style based on:
+- Fast BPM (>130) → word_pop, bounce_drop, neon_flash, slide_in
+- Medium BPM (90-130) → karaoke, word_wave, glow_pulse, typewriter
+- Slow BPM (<90) → subtitles, fade_flow, karaoke
+- Emotional lyrics → fade_flow, subtitles, karaoke
+- Hype/party lyrics → neon_flash, word_pop, bounce_drop
+- Aesthetic/artistic → typewriter, glow_pulse
+
+RESPOND WITH ONLY JSON containing:
+1. "display_style": one of {json.dumps(available_styles)}
+2. "text_color": hex color for inactive text (e.g. "#FFFFFF")
+3. "highlight_color": hex color for active word (e.g. "#FFD700")
+4. "font_family": one of {json.dumps(available_fonts)}
+5. "text_position": one of {json.dumps(available_positions)}
+6. "background_style": one of {json.dumps(available_backgrounds)}
+7. "background_opacity": float 0.0-1.0
+8. "line_display": one of {json.dumps(available_line_modes)}
+9. "style_narrative": 2-3 sentences explaining your creative choice"""
+
+    try:
+        payload = json.dumps({
+            "model": model,
+            "system": system,
+            "prompt": f"Choose the best lyrics overlay style for this song (BPM: {bpm}). Analyze the mood and energy.",
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.7, "num_predict": 500},
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{OLLAMA_BASE}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        print(f"[LyricsOverlay-LLM] 🤖 Querying '{model}' for style...")
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+            config = json.loads(raw.get("response", "{}"))
+
+            # Validate
+            if config.get("display_style") not in available_styles:
+                config["display_style"] = "word_pop"
+            if config.get("font_family") not in available_fonts:
+                config["font_family"] = "arial"
+            if config.get("text_position") not in available_positions:
+                config["text_position"] = "bottom"
+            if config.get("background_style") not in available_backgrounds:
+                config["background_style"] = "none"
+            if config.get("line_display") not in available_line_modes:
+                config["line_display"] = "single_line"
+
+            narrative = config.get("style_narrative", "")
+            print(f"[LyricsOverlay-LLM] ✅ Style: {config['display_style']}")
+            if narrative:
+                print(f"[LyricsOverlay-LLM] 💡 {narrative[:200]}")
+            return config
+
+    except Exception as e:
+        print(f"[LyricsOverlay-LLM] ❌ Error: {e}")
+        return None
