@@ -20,7 +20,7 @@ from .ollama_bridge import list_ollama_models, ask_ollama, ask_ollama_with_descr
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.12.2"
+AUTOEDITOR_NODE_VERSION = "v2026.06.12.3"
 
 
 class DJ_AutoEditor:
@@ -1907,10 +1907,11 @@ class DJ_AutoEditor:
 
 NODE_CLASS_MAPPINGS = {
     "DJ_AutoEditor": DJ_AutoEditor,
+    # Compatibility alias for workflows saved while the node was named Auto Director.
     "DJ_AutoDirector": DJ_AutoEditor,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DJ_AutoDirector": f"Auto Director {AUTOEDITOR_NODE_VERSION} 🎬",
     "DJ_AutoEditor": f"Auto Editor {AUTOEDITOR_NODE_VERSION} 🎬",
+    "DJ_AutoDirector": f"Auto Editor {AUTOEDITOR_NODE_VERSION} 🎬",
 }
