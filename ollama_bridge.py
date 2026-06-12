@@ -37,7 +37,7 @@ def frames_to_base64(frame_tensors, max_size=256):
     Resizes to max_size for bandwidth efficiency.
     """
     try:
-        import numpy as np
+        import torch
         from PIL import Image
     except ImportError:
         print("[AutoEditor-LLM] PIL not available — skipping image analysis")
@@ -46,8 +46,14 @@ def frames_to_base64(frame_tensors, max_size=256):
     images_b64 = []
     for tensor in frame_tensors:
         try:
-            np_arr = (tensor.cpu().numpy() * 255).clip(0, 255).astype("uint8")
-            img = Image.fromarray(np_arr)
+            frame_u8 = (
+                tensor.detach()
+                .clamp(0, 1)
+                .mul(255)
+                .to(dtype=torch.uint8, device="cpu")
+                .contiguous()
+            )
+            img = Image.fromarray(frame_u8.numpy()).convert("RGB")
             # Resize to save bandwidth
             w, h = img.size
             scale = min(max_size / max(w, h), 1.0)

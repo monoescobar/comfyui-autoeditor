@@ -296,14 +296,37 @@ def _unload_florence2(model, offload_device):
 
 # ─── Captioning ───────────────────────────────────────────────────────────────
 
+def _frame_tensor_to_pil(frame_tensor):
+    """Convert one [H,W,C] image tensor to PIL without a float NumPy copy."""
+    from PIL import Image
+
+    frame_u8 = (
+        frame_tensor.detach()
+        .clamp(0, 1)
+        .mul(255)
+        .to(dtype=torch.uint8, device="cpu")
+        .contiguous()
+    )
+    return Image.fromarray(frame_u8.numpy()).convert("RGB")
+
+
+def _downsample_frame_for_distortion(frame_tensor, height, width):
+    """Downsample one frame for artifact detection without copying the full video."""
+    import torch.nn.functional as F
+
+    small = F.interpolate(
+        frame_tensor.unsqueeze(0).permute(0, 3, 1, 2),
+        size=(height, width),
+        mode="bilinear",
+        align_corners=False,
+    )
+    return small[0].permute(1, 2, 0)
+
+
 def _caption_frame(model, processor, frame_tensor, dtype, device,
                    task="<DETAILED_CAPTION>", num_beams=3, max_tokens=256):
     """Generate a text caption for a single frame tensor [H,W,C] in [0,1]."""
-    from PIL import Image
-
-    # Convert tensor to PIL
-    np_arr = (frame_tensor.cpu().numpy() * 255).clip(0, 255).astype("uint8")
-    pil_img = Image.fromarray(np_arr)
+    pil_img = _frame_tensor_to_pil(frame_tensor)
 
     # Run Florence-2
     model.to(device)
@@ -353,17 +376,25 @@ def detect_distortions(frames, fps, sensitivity=2.5):
     if n < 5:
         return [], [1.0] * n
 
-    # Compute frame-to-frame MSE (downsampled for speed)
+    # Compute frame-to-frame MSE (downsampled for speed) one frame at a time.
     scale = 4
-    h, w = frames.shape[1] // scale, frames.shape[2] // scale
-    small = torch.nn.functional.interpolate(
-        frames.permute(0, 3, 1, 2), size=(h, w), mode="bilinear", align_corners=False
-    ).permute(0, 2, 3, 1)
+    h = max(1, frames.shape[1] // scale)
+    w = max(1, frames.shape[2] // scale)
 
     diffs = []
-    for i in range(1, n):
-        mse = ((small[i] - small[i-1]) ** 2).mean().item()
-        diffs.append(mse)
+    channel_shifts = []
+    with torch.no_grad():
+        prev_small = _downsample_frame_for_distortion(frames[0], h, w)
+        prev_mean = prev_small.mean(dim=(0, 1))
+        for i in range(1, n):
+            current_small = _downsample_frame_for_distortion(frames[i], h, w)
+            mse = ((current_small - prev_small) ** 2).mean().item()
+            current_mean = current_small.mean(dim=(0, 1))
+            shift = (current_mean - prev_mean).abs().max().item()
+            diffs.append(mse)
+            channel_shifts.append(shift)
+            prev_small = current_small
+            prev_mean = current_mean
 
     if not diffs:
         return [], [1.0] * n
@@ -377,11 +408,6 @@ def detect_distortions(frames, fps, sensitivity=2.5):
         np.median(padded[i:i+window]) for i in range(len(diffs_arr))
     ])
 
-    # Also compute channel-wise mean shifts (for color glitches)
-    channel_shifts = []
-    for i in range(1, n):
-        shift = (small[i].mean(dim=(0, 1)) - small[i-1].mean(dim=(0, 1))).abs().max().item()
-        channel_shifts.append(shift)
     channel_arr = np.array(channel_shifts)
     channel_median = np.median(channel_arr) if len(channel_arr) > 0 else 0
 

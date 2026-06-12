@@ -14,13 +14,14 @@ import random
 from collections.abc import Mapping
 
 from .presets import MOODS
-from .transitions import join_segments
+from .transitions import join_segment_sequence
 from .color_grading import apply_color_grade, get_grade_names, apply_visual_effects
 from .ollama_bridge import list_ollama_models, ask_ollama, ask_ollama_with_descriptions, frames_to_base64
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.12.4"
+AUTOEDITOR_NODE_VERSION = "v2026.06.12.5"
+MAX_FRAME_BATCH_ELEMENTS = 12_000_000
 
 
 class DJ_AutoEditor:
@@ -254,6 +255,14 @@ class DJ_AutoEditor:
     # ─── Speed helpers ────────────────────────────────────────────────────
 
     @staticmethod
+    def _frame_batch_size(frames, max_elements=MAX_FRAME_BATCH_ELEMENTS):
+        """Return a safe frame batch size for full-resolution image operations."""
+        if not torch.is_tensor(frames) or frames.ndim < 4 or frames.shape[0] <= 1:
+            return max(1, int(frames.shape[0])) if hasattr(frames, "shape") else 1
+        per_frame_elements = max(1, int(frames[0].numel()))
+        return max(1, min(int(frames.shape[0]), int(max_elements // per_frame_elements)))
+
+    @staticmethod
     def _get_speed_for_cut(cut_idx, total_cuts, speed_ramp, speed_factor):
         if speed_ramp == "none":
             return 1.0
@@ -276,7 +285,7 @@ class DJ_AutoEditor:
             return frames
         n_in = frames.shape[0]
         n_out = max(1, int(n_in / speed))
-        indices = torch.linspace(0, n_in - 1, n_out).long()
+        indices = torch.linspace(0, n_in - 1, n_out, device=frames.device).long()
         return frames[indices]
 
     @staticmethod
@@ -285,7 +294,7 @@ class DJ_AutoEditor:
             return audio
         n_in = audio.shape[-1]
         n_out = max(1, int(n_in / speed))
-        indices = torch.linspace(0, n_in - 1, n_out).long()
+        indices = torch.linspace(0, n_in - 1, n_out, device=audio.device).long()
         return audio[..., indices]
 
     @staticmethod
@@ -301,10 +310,26 @@ class DJ_AutoEditor:
             device=frames.device,
             dtype=torch.float32,
         )
-        left = torch.floor(positions).long()
-        right = torch.clamp(left + 1, max=frames.shape[0] - 1)
-        blend = (positions - left.float()).view(-1, 1, 1, 1).to(frames.dtype)
-        return frames[left] * (1.0 - blend) + frames[right] * blend
+        result = torch.empty(
+            (target_frames, frames.shape[1], frames.shape[2], frames.shape[3]),
+            device=frames.device,
+            dtype=frames.dtype,
+        )
+        batch_size = DJ_AutoEditor._frame_batch_size(result)
+        if batch_size < target_frames:
+            print(
+                f"[AutoEditor] Memory-safe duration resample: "
+                f"{target_frames} frames in batches of {batch_size}"
+            )
+        for start in range(0, target_frames, batch_size):
+            end = min(start + batch_size, target_frames)
+            pos = positions[start:end]
+            left = torch.floor(pos).long()
+            right = torch.clamp(left + 1, max=frames.shape[0] - 1)
+            blend = (pos - left.float()).view(-1, 1, 1, 1).to(frames.dtype)
+            blended = frames[left] * (1.0 - blend) + frames[right] * blend
+            result[start:end].copy_(blended)
+        return result
 
     @staticmethod
     def _match_audio_samples(audio, target_samples):
@@ -339,11 +364,11 @@ class DJ_AutoEditor:
         fast_part = frames[split:]
         # Stretch slow part
         n_slow_out = int(split * 1.5)
-        slow_indices = torch.linspace(0, split - 1, n_slow_out).long()
+        slow_indices = torch.linspace(0, split - 1, n_slow_out, device=frames.device).long()
         slow_stretched = slow_part[slow_indices]
         # Compress fast part to maintain total ≈ original
         n_fast_out = max(1, n - n_slow_out)
-        fast_indices = torch.linspace(0, fast_part.shape[0] - 1, n_fast_out).long()
+        fast_indices = torch.linspace(0, fast_part.shape[0] - 1, n_fast_out, device=frames.device).long()
         fast_compressed = fast_part[fast_indices]
         return torch.cat([slow_stretched, fast_compressed], dim=0)
 
@@ -363,11 +388,22 @@ class DJ_AutoEditor:
         max_x = w - crop_w
         y0 = random.randint(0, max(max_y, 0))
         x0 = random.randint(0, max(max_x, 0))
-        cropped = frames[:, y0:y0 + crop_h, x0:x0 + crop_w, :]
-        # Resize back to original
-        cropped_p = cropped.permute(0, 3, 1, 2)
-        resized = F.interpolate(cropped_p, size=(h, w), mode='bilinear', align_corners=False)
-        return resized.permute(0, 2, 3, 1)
+        result = torch.empty_like(frames)
+        batch_size = DJ_AutoEditor._frame_batch_size(frames)
+        if batch_size < n:
+            print(
+                f"[AutoEditor] Memory-safe punch-in: "
+                f"{n} frames in batches of {batch_size}"
+            )
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            cropped = frames[start:end, y0:y0 + crop_h, x0:x0 + crop_w, :]
+            cropped_p = cropped.permute(0, 3, 1, 2)
+            resized = F.interpolate(
+                cropped_p, size=(h, w), mode='bilinear', align_corners=False
+            )
+            result[start:end].copy_(resized.permute(0, 2, 3, 1))
+        return result
 
     # ─── Hold frame (freeze last frame) ──────────────────────────────────
 
@@ -386,9 +422,26 @@ class DJ_AutoEditor:
         if images.shape[1] == target_h and images.shape[2] == target_w:
             return images
         import comfy.utils
-        s = images.permute(0, 3, 1, 2)
-        s = comfy.utils.common_upscale(s, target_w, target_h, "bilinear", "center")
-        return s.permute(0, 2, 3, 1)
+        n, _, _, c = images.shape
+        result = torch.empty(
+            (n, target_h, target_w, c),
+            device=images.device,
+            dtype=images.dtype,
+        )
+        batch_size = DJ_AutoEditor._frame_batch_size(result)
+        if batch_size < n:
+            print(
+                f"[AutoEditor] Memory-safe resolution match: "
+                f"{n} frames in batches of {batch_size}"
+            )
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            s = images[start:end].permute(0, 3, 1, 2)
+            s = comfy.utils.common_upscale(
+                s, target_w, target_h, "bilinear", "center"
+            )
+            result[start:end].copy_(s.permute(0, 2, 3, 1))
+        return result
 
     @staticmethod
     def _premium_memory_budget(fps, height, width, total_source_frames):
@@ -1346,8 +1399,8 @@ class DJ_AutoEditor:
             if n_source_frames <= 0:
                 continue
 
-            # Extract frames
-            frames = all_images[vid_idx][start:end].clone()
+            # Extract frames. Keep this as a view until an effect really needs a copy.
+            frames = all_images[vid_idx][start:end]
 
             # ── Per-chunk effects ─────────────────────────────────────────
 
@@ -1436,18 +1489,23 @@ class DJ_AutoEditor:
                 )
 
         print(f"[AutoEditor] Joining {len(frame_segments)} segments with transitions...")
-        combined_frames = frame_segments[0]
-        combined_audio = audio_segments[0]
-
+        resolved_transitions = []
         for i in range(1, len(frame_segments)):
             t_type = transitions_list[(i - 1) % len(transitions_list)]
             # Black breath: randomly override transition with black_breath
             if black_breath_chance > 0 and random.random() < black_breath_chance:
                 t_type = "black_breath"
-            combined_frames = join_segments(
-                combined_frames, frame_segments[i],
-                t_type, cfg_transition_frames, effective_transition_intensity
-            )
+            resolved_transitions.append(t_type)
+
+        combined_frames = join_segment_sequence(
+            frame_segments,
+            resolved_transitions,
+            cfg_transition_frames,
+            effective_transition_intensity,
+        )
+
+        combined_audio = audio_segments[0]
+        for i in range(1, len(audio_segments)):
             crossfade_samples = int(audio_crossfade_ms / 1000 * sample_rate)
             combined_audio = self._crossfade_audio(
                 combined_audio, audio_segments[i], crossfade_samples

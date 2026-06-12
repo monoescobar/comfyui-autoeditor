@@ -75,6 +75,264 @@ def join_segments(seg_a, seg_b, transition_type, n_transition_frames, intensity=
     return fn(seg_a, seg_b, n_eff, intensity)
 
 
+def join_segment_sequence(segments, transition_types, n_transition_frames, intensity=1.0):
+    """
+    Join a full edit from pieces without repeatedly copying the growing video.
+
+    This mirrors join_segments at each boundary, but keeps already-built pieces
+    in a list and performs one final cat. It is much safer for 1080p+ edits.
+    """
+    if not segments:
+        return None
+    if len(segments) == 1:
+        return segments[0]
+
+    parts = []
+    pending = segments[0]
+    transition_types = transition_types or ["hard_cut"]
+
+    for i, seg_b in enumerate(segments[1:]):
+        transition_type = transition_types[i % len(transition_types)]
+        prefix, transition_parts, pending_tail = _join_boundary_parts(
+            pending, seg_b, transition_type, n_transition_frames, intensity
+        )
+        if prefix is not None and prefix.shape[0] > 0:
+            parts.append(prefix)
+
+        next_pending_parts = [
+            part for part in transition_parts
+            if part is not None and part.shape[0] > 0
+        ]
+        if pending_tail is not None and pending_tail.shape[0] > 0:
+            next_pending_parts.append(pending_tail)
+        if not next_pending_parts:
+            pending = seg_b[:0]
+        elif len(next_pending_parts) == 1:
+            pending = next_pending_parts[0]
+        else:
+            pending = torch.cat(next_pending_parts, dim=0)
+
+    if pending is not None and pending.shape[0] > 0:
+        parts.append(pending)
+
+    if not parts:
+        return segments[0][:0]
+    if len(parts) == 1:
+        return parts[0]
+    return torch.cat(parts, dim=0)
+
+
+def _join_boundary_parts(seg_a, seg_b, transition_type, n_transition_frames, intensity):
+    """Return (finished_prefix, inserted_transition_parts, pending_tail)."""
+    if seg_a.shape[0] == 0:
+        return None, [], seg_b
+    if seg_b.shape[0] == 0:
+        return seg_a, [], seg_b
+
+    if intensity <= 0 or n_transition_frames <= 0:
+        transition_type = "hard_cut"
+    n_eff = max(1, int(n_transition_frames * intensity))
+
+    if transition_type == "hard_cut":
+        return seg_a, [], seg_b
+
+    if transition_type == "flash_white":
+        n = max(min(n_eff, 5), 3)
+        frames = []
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            flash_amount = _smoothstep(1.0 - abs(2.0 * t - 1.0)) * intensity
+            base = seg_a[-1] if t < 0.5 else seg_b[0]
+            frames.append(base * (1.0 - flash_amount) + flash_amount)
+        return seg_a, [torch.stack(frames)], seg_b
+
+    if transition_type == "flash_black":
+        n = max(min(n_eff, 7), 3)
+        frames = []
+        for i in range(n):
+            t = (i + 1) / (n + 1)
+            black_amount = _smoothstep(1.0 - abs(2.0 * t - 1.0)) * intensity
+            base = seg_a[-1] if t < 0.5 else seg_b[0]
+            frames.append(base * (1.0 - black_amount))
+        return seg_a, [torch.stack(frames)], seg_b
+
+    if transition_type == "cross_dissolve":
+        n = min(n_eff, seg_a.shape[0], seg_b.shape[0])
+        if n <= 0:
+            return seg_a, [], seg_b
+        tail = seg_a[-n:]
+        head = seg_b[:n]
+        alphas = _smoothstep_tensor(n, seg_a.device, seg_a.dtype).view(-1, 1, 1, 1)
+        blended = tail * (1 - alphas) + head * alphas
+        return seg_a[:-n], [blended], seg_b[n:]
+
+    if transition_type == "luma_fade":
+        n = min(n_eff, seg_a.shape[0], seg_b.shape[0])
+        if n <= 0:
+            return seg_a, [], seg_b
+        tail = seg_a[-n:]
+        head = seg_b[:n]
+        frames = []
+        for i in range(n):
+            t_raw = (i + 1) / (n + 1)
+            t = _smoothstep(t_raw)
+            lum_a = tail[i, ..., 0:1] * 0.299 + tail[i, ..., 1:2] * 0.587 + tail[i, ..., 2:3] * 0.114
+            threshold = 1.0 - t * intensity
+            mask_raw = (lum_a - threshold) / max(0.15, 0.3 * (1.0 - abs(2.0 * t_raw - 1.0)))
+            mask_a = torch.clamp(mask_raw, 0, 1)
+            mask_b = 1.0 - mask_a
+            frames.append(tail[i] * mask_b + head[i] * mask_a)
+        return seg_a[:-n], [torch.stack(frames)], seg_b[n:]
+
+    if transition_type == "swipe_left":
+        n = min(n_eff, seg_a.shape[0], seg_b.shape[0])
+        if n <= 0:
+            return seg_a, [], seg_b
+        w = seg_a.shape[2]
+        frames = []
+        for i in range(n):
+            t_raw = (i + 1) / (n + 1) * intensity
+            t = _smoothstep(t_raw)
+            split = int(w * (1 - t))
+            frame = seg_a[-n + i].clone()
+            if split < w:
+                edge_width = max(1, min(8, int(w * 0.02)))
+                frame[:, split:] = seg_b[i, :, :w - split]
+                if edge_width > 0 and split > edge_width and split < w - edge_width:
+                    for e in range(edge_width):
+                        blend = (e + 1) / (edge_width + 1)
+                        col = split - edge_width + e
+                        frame[:, col] = frame[:, col] * (1 - blend) + seg_b[i, :, w - split - edge_width + e] * blend
+            frames.append(frame)
+        return seg_a[:-n], [torch.stack(frames)], seg_b[n:]
+
+    if transition_type == "swipe_up":
+        n = min(n_eff, seg_a.shape[0], seg_b.shape[0])
+        if n <= 0:
+            return seg_a, [], seg_b
+        h = seg_a.shape[1]
+        frames = []
+        for i in range(n):
+            t_raw = (i + 1) / (n + 1) * intensity
+            t = _smoothstep(t_raw)
+            split = int(h * (1 - t))
+            frame = seg_a[-n + i].clone()
+            if split < h:
+                edge_width = max(1, min(8, int(h * 0.02)))
+                frame[split:, :] = seg_b[i, :h - split, :]
+                if edge_width > 0 and split > edge_width and split < h - edge_width:
+                    for e in range(edge_width):
+                        blend = (e + 1) / (edge_width + 1)
+                        row = split - edge_width + e
+                        frame[row, :] = frame[row, :] * (1 - blend) + seg_b[i, h - split - edge_width + e, :] * blend
+            frames.append(frame)
+        return seg_a[:-n], [torch.stack(frames)], seg_b[n:]
+
+    if transition_type == "whip_pan":
+        n = min(n_eff, seg_a.shape[0], seg_b.shape[0])
+        if n <= 0:
+            return seg_a, [], seg_b
+        h, w, c = seg_a.shape[1], seg_a.shape[2], seg_a.shape[3]
+        last_a = seg_a[-1]
+        first_b = seg_b[0]
+        frames = []
+        for i in range(n):
+            t_raw = (i + 1) / (n + 1)
+            t = _smoothstep(t_raw)
+            split = int(w * (1 - t))
+            frame = torch.zeros(h, w, c, device=seg_a.device, dtype=seg_a.dtype)
+            if split > 0:
+                src_start = min(int(w * t), w - 1)
+                copy_w = min(split, w - src_start)
+                frame[:, :copy_w] = last_a[:, src_start:src_start + copy_w]
+            if split < w:
+                copy_w = w - split
+                frame[:, split:split + copy_w] = first_b[:, :copy_w]
+            blur_strength = 1.0 - abs(2.0 * t_raw - 1.0)
+            blur_r = int(w * 0.06 * intensity * blur_strength)
+            if blur_r > 1:
+                frame = _horizontal_blur(frame, blur_r)
+            frames.append(frame)
+        return seg_a[:-1], [torch.stack(frames)], seg_b[1:]
+
+    if transition_type == "zoom_punch_in":
+        n = min(n_eff, seg_b.shape[0])
+        modified_head = _apply_zoom_settle(
+            seg_b[:n], start_scale=1.0 + 0.12 * intensity, end_scale=1.0
+        )
+        pending = torch.cat([modified_head, seg_b[n:]], dim=0) if n < seg_b.shape[0] else modified_head
+        return seg_a, [], pending
+
+    if transition_type == "zoom_punch_out":
+        n = min(n_eff, seg_b.shape[0])
+        modified_head = _apply_zoom_settle(
+            seg_b[:n], start_scale=1.0 - 0.08 * intensity, end_scale=1.0
+        )
+        pending = torch.cat([modified_head, seg_b[n:]], dim=0) if n < seg_b.shape[0] else modified_head
+        return seg_a, [], pending
+
+    if transition_type == "glitch_cut":
+        n = min(n_eff, 5)
+        h, w, c = seg_a.shape[1], seg_a.shape[2], seg_a.shape[3]
+        frames = []
+        for i in range(n):
+            t = i / max(n - 1, 1)
+            decay = _ease_out(1.0 - t)
+            effective_intensity = intensity * decay
+            base = seg_a[-1] if t < 0.4 else seg_b[0]
+            frame = base.clone()
+            offset = int(w * 0.03 * effective_intensity)
+            if offset > 0 and c >= 3:
+                frame[..., 0] = torch.roll(base[..., 0], offset, dims=1)
+                frame[..., 2] = torch.roll(base[..., 2], -offset, dims=1)
+            n_slices = int(2 + 4 * effective_intensity)
+            for _ in range(n_slices):
+                y_start = torch.randint(0, max(h - 8, 1), (1,)).item()
+                slice_h = torch.randint(2, 6, (1,)).item()
+                y_end = min(y_start + slice_h, h)
+                shift = torch.randint(
+                    -int(w * 0.05 * effective_intensity) - 1,
+                    int(w * 0.05 * effective_intensity) + 1,
+                    (1,),
+                ).item()
+                if shift != 0:
+                    frame[y_start:y_end] = torch.roll(frame[y_start:y_end], shift, dims=1)
+            noise = torch.randn_like(frame) * 0.04 * effective_intensity
+            frames.append(torch.clamp(frame + noise, 0, 1))
+        return seg_a, [torch.stack(frames)], seg_b
+
+    if transition_type == "shake_cut":
+        n = min(n_eff, seg_b.shape[0], 6)
+        h, w = seg_b.shape[1], seg_b.shape[2]
+        max_shift = max(1, int(min(h, w) * 0.025 * intensity))
+        modified = seg_b[:n].clone()
+        for i in range(n):
+            decay = (0.3 ** i)
+            sx = int(torch.randint(-max_shift, max_shift + 1, (1,)).item() * decay)
+            sy = int(torch.randint(-max_shift, max_shift + 1, (1,)).item() * decay)
+            if sx != 0 or sy != 0:
+                modified[i] = torch.roll(modified[i], shifts=(sy, sx), dims=(0, 1))
+        pending = torch.cat([modified, seg_b[n:]], dim=0) if n < seg_b.shape[0] else modified
+        return seg_a, [], pending
+
+    if transition_type == "black_breath":
+        n_hold = max(1, min(int(n_eff * intensity * 0.5), 4))
+        n_fade = max(1, min(3, seg_a.shape[0] // 2, seg_b.shape[0] // 2))
+        h, w, c = seg_a.shape[1], seg_a.shape[2], seg_a.shape[3]
+        fade_out_part = seg_a[-n_fade:].clone()
+        for i in range(n_fade):
+            t = (i + 1) / (n_fade + 1)
+            fade_out_part[i] = fade_out_part[i] * (1.0 - _smoothstep(t) * intensity)
+        black = torch.zeros(n_hold, h, w, c, device=seg_a.device, dtype=seg_a.dtype)
+        fade_in_part = seg_b[:n_fade].clone()
+        for i in range(n_fade):
+            t = (i + 1) / (n_fade + 1)
+            fade_in_part[i] = fade_in_part[i] * _smoothstep(t) * intensity + fade_in_part[i] * (1.0 - intensity)
+        return seg_a[:-n_fade], [fade_out_part, black, fade_in_part], seg_b[n_fade:]
+
+    return seg_a, [], seg_b
+
+
 # ─── Transition implementations ──────────────────────────────────────────────
 
 def _hard_cut(seg_a, seg_b, n_frames, intensity):
