@@ -20,7 +20,7 @@ from .ollama_bridge import list_ollama_models, ask_ollama, ask_ollama_with_descr
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.12.1"
+AUTOEDITOR_NODE_VERSION = "v2026.06.12.2"
 
 
 class DJ_AutoEditor:
@@ -293,11 +293,15 @@ class DJ_AutoEditor:
             return frames
         if frames.shape[0] <= 1:
             return frames[:1].expand(target_frames, -1, -1, -1).clone()
-        indices = torch.linspace(
+        positions = torch.linspace(
             0, frames.shape[0] - 1, target_frames,
             device=frames.device,
-        ).long()
-        return frames[indices]
+            dtype=torch.float32,
+        )
+        left = torch.floor(positions).long()
+        right = torch.clamp(left + 1, max=frames.shape[0] - 1)
+        blend = (positions - left.float()).view(-1, 1, 1, 1).to(frames.dtype)
+        return frames[left] * (1.0 - blend) + frames[right] * blend
 
     @staticmethod
     def _match_audio_samples(audio, target_samples):
@@ -307,11 +311,16 @@ class DJ_AutoEditor:
             return audio
         if audio.shape[-1] <= 1:
             return audio[..., :1].expand(*audio.shape[:-1], target_samples).clone()
-        indices = torch.linspace(
-            0, audio.shape[-1] - 1, target_samples,
-            device=audio.device,
-        ).long()
-        return audio[..., indices]
+        import torch.nn.functional as F
+        original_shape = audio.shape
+        flattened = audio.reshape(-1, 1, original_shape[-1])
+        resized = F.interpolate(
+            flattened,
+            size=target_samples,
+            mode="linear",
+            align_corners=False,
+        )
+        return resized.reshape(*original_shape[:-1], target_samples)
 
     # ─── Micro speed ramp (slow→fast within one clip) ─────────────────────
 
@@ -1450,6 +1459,19 @@ class DJ_AutoEditor:
         if visual_effects:
             print(f"[AutoEditor] ✨ Applying {len(visual_effects)} visual effects...")
             combined_frames = apply_visual_effects(combined_frames, visual_effects)
+
+        if memory_plan.get("guard_mode") == "full_source_for_standard_tiktok_ad":
+            target_final_frames = int(memory_plan.get("source_frames", total_source_frames))
+            if target_final_frames > 0 and combined_frames.shape[0] != target_final_frames:
+                before_frames = combined_frames.shape[0]
+                combined_frames = self._match_frame_count(combined_frames, target_final_frames)
+                print(
+                    f"[AutoEditor] Duration lock restored standard ad length: "
+                    f"{before_frames} -> {target_final_frames} frames"
+                )
+                tweaks_applied.append(
+                    f"Duration lock: restored {before_frames}->{target_final_frames} frames"
+                )
 
         # ── Sanitize audio ────────────────────────────────────────────────
         target_audio_samples = int(combined_frames.shape[0] / fps * sample_rate)

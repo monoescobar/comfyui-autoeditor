@@ -32,7 +32,93 @@ def unload_whisper():
 
 # ── Main alignment function ─────────────────────────────────────────────────
 
-def align_lyrics(audio_dict, lyrics_text, model_size="base", timing_offset_ms=0):
+def _audio_duration_seconds(audio_dict):
+    """Return audio duration from a ComfyUI AUDIO dict without heavy conversion."""
+    try:
+        waveform = audio_dict["waveform"]
+        sample_rate = float(audio_dict["sample_rate"])
+        if sample_rate <= 0:
+            return 0.0
+        return float(waveform.shape[-1]) / sample_rate
+    except Exception:
+        return 0.0
+
+
+def _apply_timing_offset(aligned_lines, timing_offset_ms):
+    """Shift all lyric timestamps by a manual offset and keep them non-negative."""
+    offset_s = timing_offset_ms / 1000.0
+    if abs(offset_s) <= 0.001:
+        return
+    for line in aligned_lines:
+        line["line_start"] = max(0, line["line_start"] + offset_s)
+        line["line_end"] = max(line["line_start"] + 0.01, line["line_end"] + offset_s)
+        for w in line["words"]:
+            w["start"] = max(0, w["start"] + offset_s)
+            w["end"] = max(w["start"] + 0.01, w["end"] + offset_s)
+    print(f"[LyricsSync] Applied offset: {timing_offset_ms:+d}ms")
+
+
+def fallback_align_lyrics(lyrics_text, duration, timing_offset_ms=0):
+    """
+    Estimate clean lyric timings when Whisper is unavailable.
+
+    This keeps the Lyrics Overlay useful even if the Whisper model is missing,
+    corrupted, downloading, or blocked by network issues.
+    """
+    lines = _parse_lyrics(lyrics_text)
+    if not lines:
+        return []
+
+    duration = max(float(duration or 0.0), len(lines) * 0.55)
+    start_pad = min(0.45, duration * 0.06)
+    end_pad = min(0.45, duration * 0.06)
+    usable_start = start_pad
+    usable_end = max(usable_start + 0.1, duration - end_pad)
+    usable_duration = max(0.1, usable_end - usable_start)
+    line_gap = min(0.12, usable_duration * 0.015)
+    gap_total = line_gap * max(0, len(lines) - 1)
+    lyric_duration = max(0.1, usable_duration - gap_total)
+
+    weights = [max(1, len(line["words"])) for line in lines]
+    total_weight = max(1, sum(weights))
+    cursor = usable_start
+    aligned = []
+
+    for line, weight in zip(lines, weights):
+        line_duration = max(0.1, lyric_duration * weight / total_weight)
+        line_start = cursor
+        line_end = min(usable_end, cursor + line_duration)
+        words = line["words"]
+        word_duration = max(0.01, (line_end - line_start) / max(1, len(words)))
+        line_words = []
+
+        for idx, word in enumerate(words):
+            word_start = line_start + idx * word_duration
+            word_end = line_start + (idx + 1) * word_duration
+            line_words.append({
+                "word": word,
+                "start": word_start,
+                "end": max(word_start + 0.01, word_end),
+                "interpolated": True,
+                "estimated": True,
+            })
+
+        aligned.append({
+            "text": line["text"],
+            "line_start": line_words[0]["start"] if line_words else line_start,
+            "line_end": line_words[-1]["end"] if line_words else line_end,
+            "words": line_words,
+            "fallback_timing": True,
+            "timing_source": "estimated",
+        })
+        cursor = line_end + line_gap
+
+    _apply_timing_offset(aligned, timing_offset_ms)
+    print(f"[LyricsSync] Estimated timing fallback: {len(aligned)} lines over {duration:.1f}s")
+    return aligned
+
+
+def _align_lyrics_whisper_legacy(audio_dict, lyrics_text, model_size="base", timing_offset_ms=0):
     """
     Align lyrics text to song audio using Whisper word-level timestamps.
 
@@ -361,6 +447,113 @@ def _interpolate_timestamps(timestamps, duration):
 
 # ── BPM detection ────────────────────────────────────────────────────────────
 
+def align_lyrics(audio_dict, lyrics_text, model_size="base", timing_offset_ms=0):
+    """Align lyrics with Whisper, falling back to estimated timing when needed."""
+    global _whisper_model, _whisper_model_name
+
+    try:
+        audio_np = _prepare_audio(audio_dict)
+        duration = len(audio_np) / 16000.0
+        print(f"[LyricsSync] Audio duration: {duration:.1f}s")
+
+        import whisper
+        if _whisper_model is None or _whisper_model_name != model_size:
+            print(f"[LyricsSync] Loading Whisper '{model_size}' model...")
+            _whisper_model = whisper.load_model(model_size)
+            _whisper_model_name = model_size
+            print(f"[LyricsSync] Whisper '{model_size}' loaded")
+
+        print("[LyricsSync] Transcribing audio...")
+        result = _whisper_model.transcribe(
+            audio_np,
+            word_timestamps=True,
+            language="en",
+        )
+
+        whisper_words = []
+        for segment in result.get("segments", []):
+            for word_info in segment.get("words", []):
+                word_text = word_info.get("word", "").strip()
+                if word_text:
+                    whisper_words.append({
+                        "word": word_text,
+                        "start": float(word_info["start"]),
+                        "end": float(word_info["end"]),
+                    })
+    except Exception as e:
+        duration = _audio_duration_seconds(audio_dict)
+        print(f"[LyricsSync] Whisper unavailable ({type(e).__name__}: {e})")
+        return fallback_align_lyrics(lyrics_text, duration, timing_offset_ms)
+
+    if not whisper_words:
+        print("[LyricsSync] Whisper found no words; using estimated lyric timing")
+        return fallback_align_lyrics(lyrics_text, duration, timing_offset_ms)
+
+    print(f"[LyricsSync] Whisper detected {len(whisper_words)} words")
+    lines = _parse_lyrics(lyrics_text)
+    total_lyrics_words = sum(len(line["words"]) for line in lines)
+    print(f"[LyricsSync] Provided lyrics: {len(lines)} lines, {total_lyrics_words} words")
+    if not lines:
+        return []
+
+    aligned_lines = _align_to_whisper(lines, whisper_words, duration)
+    _apply_timing_offset(aligned_lines, timing_offset_ms)
+
+    matched = sum(1 for line in aligned_lines for word in line["words"] if not word.get("interpolated"))
+    print(f"[LyricsSync] Aligned {matched}/{total_lyrics_words} words directly, rest interpolated")
+    return aligned_lines
+
+
+def _detect_bpm_torch(audio_dict):
+    """Torch-only BPM fallback for environments where tensor->numpy is unavailable."""
+    waveform = audio_dict["waveform"].detach().float()
+    sample_rate = int(audio_dict["sample_rate"])
+    if waveform.dim() == 3:
+        waveform = waveform.squeeze(0)
+    if waveform.dim() == 2 and waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0)
+    else:
+        waveform = waveform.reshape(-1)
+
+    if sample_rate <= 0 or waveform.numel() < sample_rate // 2:
+        return 120.0
+
+    hop = max(1, int(sample_rate * 0.01))
+    win = max(hop, int(sample_rate * 0.02))
+    if waveform.numel() <= win:
+        return 120.0
+
+    frames = waveform.unfold(0, win, hop)
+    energy = torch.sqrt(torch.mean(frames * frames, dim=1) + 1e-10)
+    if energy.numel() < 3:
+        return 120.0
+
+    onset = torch.clamp(energy[1:] - energy[:-1], min=0)
+    max_onset = torch.max(onset)
+    if max_onset > 0:
+        onset = onset / max_onset
+
+    fps = sample_rate / hop
+    min_lag = max(1, int(fps * 60 / 200))
+    max_lag = min(int(fps * 60 / 60), onset.numel() - 1)
+    if max_lag <= min_lag:
+        return 120.0
+
+    best_corr = -1.0
+    best_lag = max(min_lag, min(max_lag - 1, int(fps * 60 / 120)))
+    for lag in range(min_lag, max_lag):
+        n_overlap = onset.numel() - lag
+        if n_overlap <= 0:
+            continue
+        corr = torch.sum(onset[:n_overlap] * onset[lag:lag + n_overlap]).item()
+        if corr > best_corr:
+            best_corr = corr
+            best_lag = lag
+
+    bpm = 60.0 * fps / max(1, best_lag)
+    return max(60.0, min(200.0, round(bpm, 1)))
+
+
 def detect_bpm(audio_dict):
     """
     Detect BPM from audio using onset autocorrelation.
@@ -376,7 +569,12 @@ def detect_bpm(audio_dict):
     else:
         waveform = waveform.squeeze(0)
 
-    audio = waveform.cpu().numpy().astype(np.float32)
+    try:
+        audio = waveform.cpu().numpy().astype(np.float32)
+    except Exception as e:
+        bpm = _detect_bpm_torch(audio_dict)
+        print(f"[LyricsSync] BPM numpy path unavailable ({type(e).__name__}: {e}); using torch fallback: {bpm}")
+        return bpm
 
     # Energy envelope in 10ms windows
     hop = int(sample_rate * 0.01)

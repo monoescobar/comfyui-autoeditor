@@ -133,10 +133,20 @@ class TextRenderer:
         url = FONT_URLS[family]
         try:
             print(f"[TextRenderer] Downloading font '{family}'...")
-            urllib.request.urlretrieve(url, dest)
+            with urllib.request.urlopen(url, timeout=5) as response, open(dest, "wb") as out:
+                while True:
+                    chunk = response.read(1024 * 64)
+                    if not chunk:
+                        break
+                    out.write(chunk)
             print(f"[TextRenderer] ✅ Font '{family}' downloaded")
             return dest
         except Exception as e:
+            try:
+                if os.path.exists(dest) and os.path.getsize(dest) == 0:
+                    os.remove(dest)
+            except Exception:
+                pass
             print(f"[TextRenderer] ❌ Font download failed: {e}")
             return None
 

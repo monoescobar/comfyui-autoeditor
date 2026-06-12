@@ -8,9 +8,12 @@ TikTok-optimized display styles. Supports LLM auto-styling.
 
 import torch
 
-from .lyrics_sync import align_lyrics, detect_bpm, unload_whisper
+from .lyrics_sync import align_lyrics, detect_bpm, fallback_align_lyrics, unload_whisper
 from .text_renderer import TextRenderer, DISPLAY_STYLES, LINE_MODES, POSITIONS
 from .ollama_bridge import list_ollama_models
+
+
+LYRICS_OVERLAY_NODE_VERSION = "v2026.06.12.2"
 
 
 class DJ_LyricsOverlay:
@@ -150,7 +153,7 @@ class DJ_LyricsOverlay:
             video_info = {"loaded_fps": fps, "loaded_frame_count": n_frames}
 
         print(f"\n{'='*60}")
-        print(f"[LyricsOverlay] DJ Lyrics Overlay")
+        print(f"[LyricsOverlay] DJ Lyrics Overlay {LYRICS_OVERLAY_NODE_VERSION}")
         print(f"[LyricsOverlay] Video: {n_frames} frames @ {fps:.1f}fps = {video_duration:.1f}s")
         print(f"[LyricsOverlay] Audio: {audio_duration:.1f}s")
         print(f"[LyricsOverlay] FPS source: {fps_source}")
@@ -166,9 +169,20 @@ class DJ_LyricsOverlay:
 
         # ── Step 1: Align lyrics to audio ────────────────────────────
         print(f"\n[LyricsOverlay] Step 1/3: Aligning lyrics with Whisper '{whisper_model}'...")
-        aligned = align_lyrics(song_audio, lyrics_text, whisper_model, timing_offset)
-        bpm = detect_bpm(song_audio)
-        unload_whisper()
+        try:
+            aligned = align_lyrics(song_audio, lyrics_text, whisper_model, timing_offset)
+        except Exception as e:
+            print(f"[LyricsOverlay] Alignment engine failed ({type(e).__name__}: {e})")
+            timing_duration = audio_duration if audio_duration > 0 else video_duration
+            aligned = fallback_align_lyrics(lyrics_text, timing_duration, timing_offset)
+        finally:
+            unload_whisper()
+
+        try:
+            bpm = detect_bpm(song_audio)
+        except Exception as e:
+            print(f"[LyricsOverlay] BPM detection failed ({type(e).__name__}: {e}); using 120")
+            bpm = 120.0
 
         if not aligned:
             print("[LyricsOverlay] ❌ Alignment failed — passing through unchanged")
@@ -250,6 +264,8 @@ class DJ_LyricsOverlay:
         total_words = sum(len(ln['words']) for ln in aligned)
         matched = sum(1 for ln in aligned for w in ln['words'] if not w.get('interpolated'))
         r.append(f"  Words: {total_words} ({matched} matched, {total_words-matched} interpolated)")
+        estimated = any(ln.get("fallback_timing") or any(w.get("estimated") for w in ln["words"]) for ln in aligned)
+        r.append(f"  Timing source: {'estimated fallback' if estimated else 'Whisper word timing'}")
         r.append(f"  BPM: {bpm}")
         r.append("")
         r.append(f"🎨 STYLE")
@@ -280,5 +296,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DJ_LyricsOverlay": "Lyrics Overlay 🎤",
+    "DJ_LyricsOverlay": f"Lyrics Overlay {LYRICS_OVERLAY_NODE_VERSION} 🎤",
 }
