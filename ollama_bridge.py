@@ -124,16 +124,17 @@ SOURCE VIDEOS:
 {video_summaries}
 {visual_context}
 DIRECTOR BRIEF:
-1. First choose the best mood from this list: {json.dumps(available_moods)}.
-2. Use that mood as the base edit language, then adapt it using the user's prompt.
-3. If there is no prompt, infer the best mood from the product, lighting, motion, and shot quality.
-4. The edit must make the product look desirable, real, premium, and easy to buy.
-5. The user's prompt is ADDITIVE DIRECTION. It should refine and elevate your chosen mood, not replace the mood.
-6. Think like a commercial director: build hook -> product proof/detail -> emotional desire -> hero ending.
+1. This is ALWAYS a TikTok sales ad, but it must also feel luxury, cinematic, premium, and professional.
+2. First choose the best hidden mood from this list: {json.dumps(available_moods)}.
+3. Use the selected mood as the base sentiment/edit language. The user's prompt is ADDITIVE DIRECTION that refines and elevates the mood, not a replacement.
+4. Decide how much TikTok sales energy, luxury, cinematic drama, and premium polish to apply from 25% to 100% each, based on the footage.
+5. Detect video-model problems: bad morphing, weird animation, ugly movement, distorted hands/product, fake-looking motion, or frames that feel like still images. Avoid or minimize those moments.
+6. The edit must make the product look desirable, real, premium, and easy to buy.
+7. Think like a commercial director: build hook -> product proof/detail -> emotional desire -> hero ending.
 
 PROFESSIONAL EDITING PRINCIPLES:
 1. Editing should feel intentional and mostly invisible. Avoid random effects that call attention to the edit instead of the product.
-2. Vary shot lengths musically, but do not make the whole edit frantic. Use short accents around motion/reveals and longer breathing cuts on product hero shots.
+2. Vary shot lengths musically and keep the edit punchy. Use short accents around motion/reveals and brief breathing cuts on product hero shots.
 3. INTERLEAVE videos creatively — don't just go 1,2,3,4,5,6. Create callbacks and reveals.
 3. Each transition serves a purpose:
    - cross_dissolve: Elegant blend. Best when shots share similar lighting.
@@ -170,6 +171,8 @@ RHYTHM VARIATION:
 - Every 3-5 seconds, the rhythm should evolve, not stutter.
 - A professional rhythm is: reveal -> product detail -> motion accent -> breathing hero shot -> supporting angle -> memorable close.
 - Use short cuts around action (0.5-1.0s), medium cuts for context (1.2-2.0s), and hero cuts for desirability (2.5-4.0s).
+- For TikTok sales, prefer energetic commercial rhythm: most cuts 0.45-1.8s, with only occasional longer hero moments.
+- Avoid slow edits that feel like still images. Never stretch weak footage just to preserve duration.
 - Avoid excessive 0.2-0.4s cutting unless the footage is truly music/action driven.
 - The variable_durations string should have smooth variation (e.g. "1.0,2.6,0.8,1.6,3.0,0.9,2.2,1.2,3.5")
 
@@ -207,7 +210,7 @@ ALL PARAMETERS (include EVERY key in your JSON response):
 19. "hold_frame_chance": float 0.0-0.12
 20. "micro_ramp_chance": float 0.0-0.25
 21. "contrast_protect": boolean true/false — enable soft contrast protection (recommend true)
-22. "edit_narrative": A 3-5 sentence PERSONAL explanation of your creative vision. Explain the chosen mood, how the user's prompt modified it, the hook, the middle proof/detail section, and the hero ending. Write as a creative director explaining their vision to a client.
+22. "edit_narrative": A 3-5 sentence PERSONAL explanation of your creative vision. Explain the chosen mood, how the user's prompt modified it, how much TikTok/luxury/cinematic/premium energy you applied, what weak AI-video motion should be avoided, the hook, the proof/detail section, and the hero ending. Write as a creative director explaining their vision to a client.
 
 RESPOND WITH ONLY A VALID JSON OBJECT. No markdown, no explanation outside the JSON."""
 
@@ -451,6 +454,14 @@ SOURCE VIDEOS:
 {vision_context}
 
 PROFESSIONAL EDITING RULES:
+OVERRIDING SALES-DIRECTOR RULES:
+- This is ALWAYS a TikTok sales ad, but it must also feel luxury, cinematic, premium, and professional.
+- Choose one of the 20 hidden moods as the base sentiment/edit language.
+- The user's prompt is additive direction: refine and elevate the chosen mood, do not replace it.
+- Decide how much TikTok sales energy, luxury, cinematic drama, and premium polish to apply from 25% to 100% each, based on the footage.
+- Detect video-model problems: bad morphing, weird animation, ugly movement, distorted hands/product, fake-looking motion, or frames that feel like still images. Avoid or minimize those moments.
+- Keep the edit punchy and alive. Do not make a slow sequence of almost-still images.
+
 1. Use the VISUAL ANALYSIS above to choose the best mood from this list: {json.dumps(available_moods)}.
 2. Use that mood as the base edit language, then adapt it using the user's prompt.
 3. Lead with the STRONGEST believable product shot. Close with a memorable product angle.

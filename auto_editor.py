@@ -889,16 +889,16 @@ class DJ_AutoEditor:
             return chunks
 
         result = []
-        min_burst_frames = max(3, int(0.3 * fps))  # Minimum burst sub-cut: 0.3s
+        min_burst_frames = max(6, int(0.45 * fps))  # Premium bursts should not feel like flicker
 
         for chunk in chunks:
             vid_idx, start, end = chunk
             chunk_frames = end - start
 
             # Only burst-split chunks that are long enough
-            if chunk_frames > int(fps * 1.0) and random.random() < burst_frequency:
-                # Split into 3-4 rapid sub-cuts with VARIED sizes
-                n_sub = random.randint(3, 4)
+            if chunk_frames > int(fps * 1.4) and random.random() < burst_frequency:
+                # Split into 2-3 accented sub-cuts with VARIED sizes
+                n_sub = random.randint(2, 3)
                 # Generate random weights for unequal sub-cuts
                 weights = [random.random() + 0.3 for _ in range(n_sub)]  # 0.3-1.3 range
                 total_weight = sum(weights)
@@ -934,12 +934,12 @@ class DJ_AutoEditor:
         enable_bursts = True
         enable_black_breath = False
         enable_hold = False
-        enable_jump_cuts = True
+        enable_jump_cuts = False
         enable_micro_ramp = False
         enable_vision = True
         quality_mode = "premium"
         vision_quality = "detailed"
-        distortion_mode = "freeze_frames"
+        distortion_mode = "skip_frames"
         enable_contrast_protect = True
         enable_phased = False
 
@@ -1408,24 +1408,15 @@ class DJ_AutoEditor:
             print(f"[AutoEditor] ✨ Applying {len(visual_effects)} visual effects...")
             combined_frames = apply_visual_effects(combined_frames, visual_effects)
 
-        target_output_frames = int(total_source_frames)
-        if combined_frames.shape[0] != target_output_frames:
-            before_frames = combined_frames.shape[0]
-            combined_frames = self._match_frame_count(combined_frames, target_output_frames)
-            print(
-                f"[AutoEditor] Duration lock: {before_frames} -> "
-                f"{target_output_frames} frames to match source total"
-            )
-
         # ── Sanitize audio ────────────────────────────────────────────────
-        target_audio_samples = int(target_output_frames / fps * sample_rate)
+        target_audio_samples = int(combined_frames.shape[0] / fps * sample_rate)
         if combined_audio.shape[-1] != target_audio_samples:
             before_samples = combined_audio.shape[-1]
             combined_audio = self._match_audio_samples(
                 combined_audio, target_audio_samples
             )
             print(
-                f"[AutoEditor] Audio duration lock: {before_samples} -> "
+                f"[AutoEditor] Audio/video sync: {before_samples} -> "
                 f"{target_audio_samples} samples"
             )
         combined_audio = self._sanitize_audio(combined_audio, "final")
@@ -1619,7 +1610,7 @@ class DJ_AutoEditor:
         r.append(f"  {final_duration:.1f}s output from {total_source_dur:.1f}s of source footage")
         r.append(f"  {len(frame_segments)} cuts at {fps}fps • {target_w}×{target_h}")
         r.append(f"  Output frames: {final_frames}")
-        r.append(f"  Duration policy: {config.get('duration_policy', 'preserve_total_source_duration')}")
+        r.append(f"  Duration policy: {config.get('duration_policy', 'flexible_punchy_sales_edit')}")
         r.append(f"  Recommended song BPM: {config.get('recommended_bpm', 'see INT output')}")
         if arc_plan.get("trimmed"):
             r.append("  Large source protected by memory-safe commercial selection")
@@ -1639,8 +1630,8 @@ class DJ_AutoEditor:
         notes = ["Quality mode: premium commercial director"]
 
         config["quality_mode"] = "premium"
-        config["edit_strategy"] = "hook -> product proof/detail -> hero ending"
-        config["duration_policy"] = "preserve_total_source_duration"
+        config["edit_strategy"] = "premium TikTok sales arc: hook -> proof/detail -> desire -> hero CTA"
+        config["duration_policy"] = "flexible_punchy_sales_edit"
         config["max_output_frames"] = memory_plan.get("max_output_frames")
         config["max_output_seconds"] = memory_plan.get("max_output_seconds")
 
@@ -1660,7 +1651,10 @@ class DJ_AutoEditor:
                 "hard_cut", "cross_dissolve", "luma_fade", "zoom_punch_in"
             ]
             notes.append("Premium transitions: replaced noisy cuts with clean commercial transitions")
-        config["transitions"] = polished_transitions[:6]
+        clean_priority = ["hard_cut", "zoom_punch_in", "cross_dissolve", "luma_fade", "swipe_left", "swipe_up"]
+        ordered_transitions = [t for t in clean_priority if t in polished_transitions]
+        ordered_transitions += [t for t in polished_transitions if t not in ordered_transitions]
+        config["transitions"] = ordered_transitions[:5] or ["hard_cut", "zoom_punch_in", "cross_dissolve"]
 
         vfx = config.get("visual_effects", [])
         if isinstance(vfx, str):
@@ -1676,7 +1670,7 @@ class DJ_AutoEditor:
         config["speed_ramp"] = "none"
         config["speed_factor"] = 1.0
         if not config.get("variable_durations"):
-            config["variable_durations"] = "0.9,2.4,1.1,1.7,3.0,0.8,2.1,1.3,3.4"
+            config["variable_durations"] = "0.55,1.15,0.75,1.6,0.65,2.2,0.9,1.35,2.6"
 
         def clamp_float(key, lo, hi, default):
             try:
@@ -1685,13 +1679,13 @@ class DJ_AutoEditor:
                 value = default
             config[key] = max(lo, min(hi, value))
 
-        clamp_float("min_chunk_duration", 0.55, 1.4, 0.8)
-        clamp_float("max_chunk_duration", max(config["min_chunk_duration"], 1.8), 4.2, 3.2)
-        clamp_float("shuffle_intensity", 0.25, 0.68, 0.48)
-        clamp_float("transition_intensity", 0.55, 0.9, 0.75)
+        clamp_float("min_chunk_duration", 0.38, 0.9, 0.55)
+        clamp_float("max_chunk_duration", max(config["min_chunk_duration"], 1.4), 2.8, 2.2)
+        clamp_float("shuffle_intensity", 0.38, 0.72, 0.58)
+        clamp_float("transition_intensity", 0.45, 0.82, 0.68)
         clamp_float("reverse_chance", 0.0, 0.05, 0.0)
-        clamp_float("punch_in_chance", 0.08, 0.28, 0.18)
-        clamp_float("burst_frequency", 0.0, 0.18, 0.08)
+        clamp_float("punch_in_chance", 0.12, 0.32, 0.24)
+        clamp_float("burst_frequency", 0.02, 0.16, 0.10)
         clamp_float("black_breath_chance", 0.0, 0.02, 0.0)
         clamp_float("hold_frame_chance", 0.0, 0.04, 0.0)
         clamp_float("micro_ramp_chance", 0.0, 0.18, 0.10)
@@ -1712,9 +1706,9 @@ class DJ_AutoEditor:
                 else ""
             )
             narrative = (
-                "Premium commercial director mode is building a clean persuasive arc: "
-                "open with the strongest hook, use the middle for product texture and proof, "
-                "and finish on the most desirable hero angle." + prompt_note
+                "Premium TikTok sales director mode is building a punchy persuasive arc: "
+                "open fast with the strongest hook, remove bad AI/morphing motion, use the middle "
+                "for product texture and proof, and finish on the most desirable cinematic hero angle." + prompt_note
             )
         config["edit_narrative"] = str(narrative)
         return config, notes
@@ -1724,29 +1718,30 @@ class DJ_AutoEditor:
         """Premium automatic fallback when the LLM is unavailable."""
         config = MOODS.get("cinematic", MOODS["bold"]).copy()
         config.update({
-            "selected_mood": "cinematic",
+            "selected_mood": "bold",
             "cut_duration_mode": "variable",
-            "variable_durations": "1.2,2.8,0.9,2.2,1.0,3.2,0.8,2.6,1.4,3.0",
-            "transitions": ["cross_dissolve", "luma_fade", "zoom_punch_in", "swipe_left", "hard_cut"],
-            "transition_frames": 10,
-            "transition_intensity": 0.78,
+            "variable_durations": "0.55,1.15,0.75,1.6,0.65,2.2,0.9,1.35,2.6",
+            "transitions": ["hard_cut", "zoom_punch_in", "cross_dissolve", "luma_fade", "swipe_left"],
+            "transition_frames": 6,
+            "transition_intensity": 0.68,
             "speed_ramp": "none",
             "speed_factor": 1.0,
             "color_grade": "hollywood",
             "visual_effects": ["bloom", "film_grain", "contrast_protect"],
             "contrast_protect": True,
-            "min_chunk_duration": 0.8,
-            "max_chunk_duration": 3.2,
-            "shuffle_intensity": 0.55,
+            "min_chunk_duration": 0.55,
+            "max_chunk_duration": 2.2,
+            "shuffle_intensity": 0.58,
             "reverse_chance": 0.0,
-            "punch_in_chance": 0.18,
-            "burst_frequency": 0.12,
+            "punch_in_chance": 0.24,
+            "burst_frequency": 0.10,
             "black_breath_chance": 0.0,
             "hold_frame_chance": 0.0,
-            "micro_ramp_chance": 0.12,
+            "micro_ramp_chance": 0.0,
             "edit_narrative": (
-                "Automatic premium product edit: smooth visual rhythm, believable product presentation, "
-                "soft cinematic color, clean transitions, and selective movement accents."
+                "Automatic premium TikTok sales edit: fast hook, cinematic product detail, "
+                "clean premium transitions, believable movement, and a desirable hero ending. "
+                "Bad AI/morphing motion is removed when detected instead of frozen."
             ),
         })
         return config
