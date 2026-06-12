@@ -66,8 +66,11 @@ class DJ_AutoEditor:
 
     CATEGORY = "audio/video processing"
     FUNCTION = "auto_edit"
-    RETURN_NAMES = ("images_output", "audio_output", "video_info_output", "edit_report", "vision_descriptions")
-    RETURN_TYPES = ("IMAGE", "AUDIO", "VHS_VIDEOINFO", "STRING", "STRING")
+    RETURN_NAMES = (
+        "images_output", "audio_output", "video_info_output", "edit_report",
+        "vision_descriptions", "output_frame_count", "recommended_bpm",
+    )
+    RETURN_TYPES = ("IMAGE", "AUDIO", "VHS_VIDEOINFO", "STRING", "STRING", "INT", "INT")
 
     # ─── Mood descriptions for the edit report ────────────────────────────
     MOOD_DESCRIPTIONS = {
@@ -279,6 +282,34 @@ class DJ_AutoEditor:
         indices = torch.linspace(0, n_in - 1, n_out).long()
         return audio[..., indices]
 
+    @staticmethod
+    def _match_frame_count(frames, target_frames):
+        """Temporally resample frames to the exact requested count."""
+        target_frames = max(1, int(target_frames))
+        if frames.shape[0] == target_frames:
+            return frames
+        if frames.shape[0] <= 1:
+            return frames[:1].expand(target_frames, -1, -1, -1).clone()
+        indices = torch.linspace(
+            0, frames.shape[0] - 1, target_frames,
+            device=frames.device,
+        ).long()
+        return frames[indices]
+
+    @staticmethod
+    def _match_audio_samples(audio, target_samples):
+        """Temporally resample audio to the exact requested sample count."""
+        target_samples = max(1, int(target_samples))
+        if audio.shape[-1] == target_samples:
+            return audio
+        if audio.shape[-1] <= 1:
+            return audio[..., :1].expand(*audio.shape[:-1], target_samples).clone()
+        indices = torch.linspace(
+            0, audio.shape[-1] - 1, target_samples,
+            device=audio.device,
+        ).long()
+        return audio[..., indices]
+
     # ─── Micro speed ramp (slow→fast within one clip) ─────────────────────
 
     @staticmethod
@@ -424,6 +455,67 @@ class DJ_AutoEditor:
         return scores, details
 
     @staticmethod
+    def _estimate_motion_energy(all_images):
+        """Estimate visual motion energy across all source videos."""
+        energies = []
+        for frames in all_images.values():
+            n = frames.shape[0]
+            if n < 2:
+                continue
+            sample_n = min(24, n)
+            sample_idx = torch.linspace(0, n - 1, sample_n).long()
+            sample = frames[sample_idx].float()
+            motion = (sample[1:] - sample[:-1]).abs().mean().item()
+            energies.append(motion)
+        if not energies:
+            return 0.35
+        return max(0.0, min(1.0, sum(energies) / len(energies) * 4.0))
+
+    @staticmethod
+    def _recommend_bpm(config, all_images, source_scores):
+        """Recommend a song BPM from mood, motion, and footage confidence."""
+        mood = str(config.get("selected_mood", "cinematic")).lower()
+        mood_base = {
+            "calm": 86,
+            "dreamy": 92,
+            "romantic": 94,
+            "nature": 96,
+            "elegant": 100,
+            "warm": 104,
+            "minimal": 100,
+            "luxury": 104,
+            "cinematic": 112,
+            "editorial": 116,
+            "retro": 116,
+            "playful": 124,
+            "bold": 126,
+            "urban": 128,
+            "energetic": 138,
+            "neon": 140,
+            "intense": 146,
+            "chaos": 150,
+            "raw": 118,
+            "hypnotic": 108,
+        }
+        bpm = mood_base.get(mood, 118)
+        motion_energy = DJ_AutoEditor._estimate_motion_energy(all_images)
+        average_quality = (
+            sum(source_scores.values()) / max(1, len(source_scores))
+            if source_scores else 0.55
+        )
+
+        bpm += int(round((motion_energy - 0.35) * 32))
+        if config.get("burst_frequency", 0) > 0.12:
+            bpm += 6
+        if config.get("shuffle_intensity", 0) > 0.6:
+            bpm += 4
+        if average_quality < 0.45:
+            bpm -= 6
+
+        bpm = int(max(82, min(152, bpm)))
+        return int(round(bpm / 2) * 2)
+
+    @staticmethod
     def _commercial_chunk_score(chunk, source_scores, fps):
         vid_idx, start, end = chunk
         dur = max(0.0, (end - start) / max(1, fps))
@@ -459,6 +551,23 @@ class DJ_AutoEditor:
         ]
         hook = short_candidates[0] if short_candidates else scored[0]
         hero = scored[0]
+        if total_frames <= max_output_frames:
+            ordered = list(chunks)
+            if ordered and tuple(hook) in [tuple(c) for c in ordered]:
+                ordered.remove(hook)
+                ordered.insert(0, hook)
+            if ordered and tuple(hero) in [tuple(c) for c in ordered] and tuple(hero) != tuple(hook):
+                ordered.remove(hero)
+                ordered.append(hero)
+            ordered = cls._fix_consecutive(ordered)
+            return ordered, {
+                "trimmed": False,
+                "source_frames": total_frames,
+                "selected_frames": total_frames,
+                "max_output_frames": max_output_frames,
+                "hook_video": hook[0],
+                "hero_video": hero[0],
+            }
 
         selected = []
         selected_keys = set()
@@ -826,7 +935,7 @@ class DJ_AutoEditor:
         enable_black_breath = False
         enable_hold = False
         enable_jump_cuts = True
-        enable_micro_ramp = True
+        enable_micro_ramp = False
         enable_vision = True
         quality_mode = "premium"
         vision_quality = "detailed"
@@ -1299,7 +1408,26 @@ class DJ_AutoEditor:
             print(f"[AutoEditor] ✨ Applying {len(visual_effects)} visual effects...")
             combined_frames = apply_visual_effects(combined_frames, visual_effects)
 
+        target_output_frames = int(total_source_frames)
+        if combined_frames.shape[0] != target_output_frames:
+            before_frames = combined_frames.shape[0]
+            combined_frames = self._match_frame_count(combined_frames, target_output_frames)
+            print(
+                f"[AutoEditor] Duration lock: {before_frames} -> "
+                f"{target_output_frames} frames to match source total"
+            )
+
         # ── Sanitize audio ────────────────────────────────────────────────
+        target_audio_samples = int(target_output_frames / fps * sample_rate)
+        if combined_audio.shape[-1] != target_audio_samples:
+            before_samples = combined_audio.shape[-1]
+            combined_audio = self._match_audio_samples(
+                combined_audio, target_audio_samples
+            )
+            print(
+                f"[AutoEditor] Audio duration lock: {before_samples} -> "
+                f"{target_audio_samples} samples"
+            )
         combined_audio = self._sanitize_audio(combined_audio, "final")
 
         # ── Build outputs ─────────────────────────────────────────────────
@@ -1310,6 +1438,8 @@ class DJ_AutoEditor:
 
         final_frames = combined_frames.shape[0]
         final_duration = final_frames / fps
+        recommended_bpm = self._recommend_bpm(config, all_images, source_scores)
+        config["recommended_bpm"] = recommended_bpm
 
         video_info_output = {
             "loaded_fps": fps,
@@ -1339,6 +1469,7 @@ class DJ_AutoEditor:
         print(f"\n{'='*60}")
         print(f"[AutoEditor] ✅ DONE — FRAGMENT & SHUFFLE")
         print(f"[AutoEditor]   Output: {final_frames} frames ({final_duration:.2f}s) at {fps}fps")
+        print(f"[AutoEditor]   Recommended song BPM: {recommended_bpm}")
         print(f"[AutoEditor]   Resolution: {target_w}x{target_h}")
         print(f"[AutoEditor]   Mood: {mood}")
         print(f"[AutoEditor]   Chunks: {len(shuffled_chunks)} fragments from {n_videos} videos")
@@ -1360,8 +1491,10 @@ class DJ_AutoEditor:
         else:
             raw_descriptions = f"(Vision analysis was disabled or unavailable)\nError: {vision_error}"
 
-        return (combined_frames, audio_output, video_info_output, edit_report,
-                raw_descriptions)
+        return (
+            combined_frames, audio_output, video_info_output, edit_report,
+            raw_descriptions, int(final_frames), int(recommended_bpm)
+        )
 
     # ─── Report builder ──────────────────────────────────────────────────
 
@@ -1485,6 +1618,9 @@ class DJ_AutoEditor:
         r.append("─" * 40)
         r.append(f"  {final_duration:.1f}s output from {total_source_dur:.1f}s of source footage")
         r.append(f"  {len(frame_segments)} cuts at {fps}fps • {target_w}×{target_h}")
+        r.append(f"  Output frames: {final_frames}")
+        r.append(f"  Duration policy: {config.get('duration_policy', 'preserve_total_source_duration')}")
+        r.append(f"  Recommended song BPM: {config.get('recommended_bpm', 'see INT output')}")
         if arc_plan.get("trimmed"):
             r.append("  Large source protected by memory-safe commercial selection")
         else:
@@ -1504,6 +1640,7 @@ class DJ_AutoEditor:
 
         config["quality_mode"] = "premium"
         config["edit_strategy"] = "hook -> product proof/detail -> hero ending"
+        config["duration_policy"] = "preserve_total_source_duration"
         config["max_output_frames"] = memory_plan.get("max_output_frames")
         config["max_output_seconds"] = memory_plan.get("max_output_seconds")
 
@@ -1536,6 +1673,8 @@ class DJ_AutoEditor:
         config["contrast_protect"] = True
 
         config["cut_duration_mode"] = "variable"
+        config["speed_ramp"] = "none"
+        config["speed_factor"] = 1.0
         if not config.get("variable_durations"):
             config["variable_durations"] = "0.9,2.4,1.1,1.7,3.0,0.8,2.1,1.3,3.4"
 
@@ -1563,6 +1702,7 @@ class DJ_AutoEditor:
         config["reverse_chance"] = 0.0
         config["black_breath_chance"] = 0.0
         config["hold_frame_chance"] = 0.0
+        config["micro_ramp_chance"] = 0.0
 
         narrative = config.get("edit_narrative", "")
         if not narrative:
