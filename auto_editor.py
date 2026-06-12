@@ -20,6 +20,9 @@ from .ollama_bridge import list_ollama_models, ask_ollama, ask_ollama_with_descr
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
+AUTOEDITOR_NODE_VERSION = "v2026.06.12.1"
+
+
 class DJ_AutoEditor:
     def __init__(self):
         pass
@@ -1538,7 +1541,7 @@ class DJ_AutoEditor:
                       quality_mode, memory_plan, source_details, arc_plan):
         r = []
         r.append("═" * 50)
-        r.append("🎥 AUTO EDITOR — CREATIVE REPORT")
+        r.append(f"🎥 AUTO EDITOR {AUTOEDITOR_NODE_VERSION} — CREATIVE REPORT")
         r.append("═" * 50)
         r.append("")
 
@@ -1886,6 +1889,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DJ_AutoDirector": "Auto Director 🎬",
-    "DJ_AutoEditor": "Auto Editor 🎬",
+    "DJ_AutoDirector": f"Auto Director {AUTOEDITOR_NODE_VERSION} 🎬",
+    "DJ_AutoEditor": f"Auto Editor {AUTOEDITOR_NODE_VERSION} 🎬",
 }
