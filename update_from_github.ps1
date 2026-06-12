@@ -2,10 +2,9 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 function Invoke-Git {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    & git @Args
+    & git @args
     if ($LASTEXITCODE -ne 0) {
-        throw "Git command failed: git $($Args -join ' ')"
+        throw "Git command failed: git $($args -join ' ')"
     }
 }
 

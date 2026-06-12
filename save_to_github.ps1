@@ -7,10 +7,9 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 function Invoke-Git {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    & git @Args
+    & git @args
     if ($LASTEXITCODE -ne 0) {
-        throw "Git command failed: git $($Args -join ' ')"
+        throw "Git command failed: git $($args -join ' ')"
     }
 }
 
@@ -29,14 +28,14 @@ if ($status) {
     Write-Host "No local changes to commit."
 }
 
-Write-Host "Checking GitHub for updates..."
-Invoke-Git pull --rebase origin master
-
 if (-not $NoPush) {
+    Write-Host "Checking GitHub for updates..."
+    Invoke-Git pull --rebase origin master
+
     Write-Host "Uploading to GitHub..."
     Invoke-Git push origin master
 } else {
-    Write-Host "NoPush selected, skipping upload."
+    Write-Host "NoPush selected, skipping GitHub pull/upload."
 }
 
 Write-Host ""
