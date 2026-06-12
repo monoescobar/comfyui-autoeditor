@@ -1358,8 +1358,10 @@ class DJ_AutoEditor:
 
 NODE_CLASS_MAPPINGS = {
     "DJ_AutoEditor": DJ_AutoEditor,
+    "DJ_AutoDirector": DJ_AutoEditor,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "DJ_AutoDirector": "Auto Director 🎬",
     "DJ_AutoEditor": "Auto Editor 🎬",
 }
