@@ -94,6 +94,12 @@ def ask_ollama(model, user_prompt, video_summaries, keyframe_images=None, keyfra
         "none", "slow_motion", "speed_up", "fast_start",
         "speed_up_end", "accelerate",
     ]
+    available_moods = [
+        "dreamy", "romantic", "calm", "nature", "elegant", "warm",
+        "minimal", "playful", "retro", "cinematic", "bold", "luxury",
+        "urban", "energetic", "intense", "hypnotic", "raw", "neon",
+        "editorial", "chaos",
+    ]
 
     # Build visual context if keyframes are available
     visual_context = ""
@@ -112,14 +118,21 @@ def ask_ollama(model, user_prompt, video_summaries, keyframe_images=None, keyfra
             "  - Bright/energetic footage → flash_white or swipe transitions\n"
         )
 
-    system = f"""You are a world-class cinematic video editor with 20 years of Hollywood experience. You create edits that feel like movie trailers and premium commercials. You always think in terms of story, emotion, and visual rhythm.
+    system = f"""You are a world-class product commercial director, film editor, and advertising creative director. You create premium edits that sell the product while keeping it believable, clean, and cinematic.
 
 SOURCE VIDEOS:
 {video_summaries}
 {visual_context}
+DIRECTOR BRIEF:
+1. First choose the best mood from this list: {json.dumps(available_moods)}.
+2. Use that mood as the base edit language, then adapt it using the user's prompt.
+3. If there is no prompt, infer the best mood from the product, lighting, motion, and shot quality.
+4. The edit must make the product look desirable, real, premium, and easy to buy.
+
 PROFESSIONAL EDITING PRINCIPLES:
-1. NEVER be monotonous. Vary cut lengths dramatically to create musical rhythm.
-2. INTERLEAVE videos creatively — don't just go 1,2,3,4,5,6. Create callbacks and reveals.
+1. Editing should feel intentional and mostly invisible. Avoid random effects that call attention to the edit instead of the product.
+2. Vary shot lengths musically, but do not make the whole edit frantic. Use short accents around motion/reveals and longer breathing cuts on product hero shots.
+3. INTERLEAVE videos creatively — don't just go 1,2,3,4,5,6. Create callbacks and reveals.
 3. Each transition serves a purpose:
    - cross_dissolve: Elegant blend. Best when shots share similar lighting.
    - luma_fade: Sophisticated brightness reveal. Premium luxury look.
@@ -132,9 +145,9 @@ PROFESSIONAL EDITING PRINCIPLES:
    - shake_cut: Camera impact. Action and sports energy.
    - glitch_cut: Digital distortion. Tech, gaming, edgy content.
    - hard_cut: Clean cut. Use between naturally flowing compositions.
-4. Use MULTIPLE different transitions — cycle through 4-6 types for variety.
-5. Always choose bold, cinematic color grades. 'hollywood' and 'blockbuster' are the premium options.
-6. ALWAYS add visual effects — chromatic_aberration and bloom at minimum.
+4. Prefer clean transitions: hard_cut, cross_dissolve, luma_fade, zoom_punch_in, subtle swipe. Use flash/glitch/shake only for rare emphasis.
+5. Choose cinematic color grades that preserve product detail and skin/material believability.
+6. Visual effects must be restrained: bloom, film_grain, contrast_protect are usually enough. Use chromatic aberration lightly.
 
 FRAGMENT & SHUFFLE SYSTEM:
 This editor chops each source video into small fragments (chunks) and shuffles them across the timeline.
@@ -145,32 +158,33 @@ This editor chops each source video into small fragments (chunks) and shuffles t
 - For BALANCED edits: min 0.8-1.5s, max 2.0-3.5s, shuffle 0.5-0.7
 - ALWAYS use some shuffle (at least 0.3) — pure sequential looks amateurish
 
-⚠️ CRITICAL CONTRAST RULES:
+CRITICAL CONTRAST RULES:
 - NEVER use "high_contrast" as color_grade — it looks harsh and amateur.
 - Prefer "hollywood", "cinematic_warm", or "teal_orange" for premium look.
 - ALWAYS include "contrast_protect" in visual_effects to prevent crushed blacks/blown highlights.
 - Keep the final look SOFT and CINEMATIC, never harsh or blown out.
 
-🎬 RHYTHM VARIATION (VERY IMPORTANT):
-- Every 3-5 seconds, the editing rhythm MUST change dramatically.
-- Alternate between rapid-fire bursts (0.2-0.6s cuts) and lingering breathing moments (2-4s cuts).
-- A good edit rhythm: burst burst burst → BREATHE → medium medium → burst burst → BREATHE
-- NEVER let cuts be uniform length — that looks robotic and boring.
-- The variable_durations string should show EXTREME variation (e.g. "0.3,2.5,0.4,0.5,3.0,0.3,1.5,0.4,4.0")
+RHYTHM VARIATION:
+- Every 3-5 seconds, the rhythm should evolve, not stutter.
+- A professional rhythm is: reveal -> product detail -> motion accent -> breathing hero shot -> supporting angle -> memorable close.
+- Use short cuts around action (0.5-1.0s), medium cuts for context (1.2-2.0s), and hero cuts for desirability (2.5-4.0s).
+- Avoid excessive 0.2-0.4s cutting unless the footage is truly music/action driven.
+- The variable_durations string should have smooth variation (e.g. "1.0,2.6,0.8,1.6,3.0,0.9,2.2,1.2,3.5")
 
-PER-CHUNK EFFECTS (set probability 0.0-1.0, use sparingly for professional results):
-- reverse_chance: Play fragment backwards. Great for visual variety. 0.0-0.3 range.
-- punch_in_chance: Random subtle zoom crop (102-108%). Simulates camera movement. 0.0-0.5 range.
-- burst_frequency: How often rapid-fire 3-4 cut burst sequences appear. 0.0-0.8 range.
-- black_breath_chance: Insert 2-4 black frames between fragments. Creates rhythm. 0.0-0.3 range.
-- hold_frame_chance: Freeze last frame for 3-5 frames. Adds impact. 0.0-0.3 range.
-- micro_ramp_chance: Per-clip speed: slow-motion → snap to normal. 0.0-0.4 range.
+PER-CHUNK EFFECTS (use sparingly for professional results):
+- reverse_chance: usually 0.0; only use when it still looks believable.
+- punch_in_chance: 0.08-0.30 for subtle camera movement and product emphasis.
+- burst_frequency: 0.05-0.35; bursts should be accents, not the whole edit.
+- black_breath_chance: usually 0.0; black frames often feel choppy in product ads.
+- hold_frame_chance: usually 0.0-0.08; freezes can make AI footage feel fake.
+- micro_ramp_chance: 0.05-0.25 for polished energy.
 
 ALL PARAMETERS (include EVERY key in your JSON response):
 
+0. "selected_mood": one of {json.dumps(available_moods)}
 1. "cut_duration_mode": "variable" (always use variable for professional rhythm)
 2. "fixed_cut_duration": float 0.5-10.0
-3. "variable_durations": comma-separated floats — create EXTREME variation (e.g. "0.3,2.5,0.4,3.5,0.5,1.8,0.3,4.0")
+3. "variable_durations": comma-separated floats with polished variation (e.g. "1.0,2.6,0.8,1.6,3.0,0.9,2.2,1.2,3.5")
 4. "cut_pattern": comma-separated video numbers — interleave CREATIVELY with callbacks
 5. "transitions": JSON array of 4-6 different transitions to cycle through
    Available: {json.dumps(available_transitions)}
@@ -184,12 +198,12 @@ ALL PARAMETERS (include EVERY key in your JSON response):
 12. "min_chunk_duration": float 0.2-5.0 (minimum fragment size in seconds)
 13. "max_chunk_duration": float 0.5-5.0 (maximum fragment size in seconds, must be >= min)
 14. "shuffle_intensity": float 0.0-1.0 (0=sequential, 1=fully random interleaving)
-15. "reverse_chance": float 0.0-0.3 (probability of playing a fragment backwards)
-16. "punch_in_chance": float 0.0-0.5 (probability of random zoom crop on a fragment)
-17. "burst_frequency": float 0.0-1.0 (how often rapid-fire burst sequences appear)
-18. "black_breath_chance": float 0.0-0.3 (probability of black frame breathing gaps)
-19. "hold_frame_chance": float 0.0-0.3 (probability of freeze on last frame of a clip)
-20. "micro_ramp_chance": float 0.0-0.4 (probability of slow→fast speed ramp within a clip)
+15. "reverse_chance": float 0.0-0.15
+16. "punch_in_chance": float 0.0-0.35
+17. "burst_frequency": float 0.0-0.35
+18. "black_breath_chance": float 0.0-0.08
+19. "hold_frame_chance": float 0.0-0.12
+20. "micro_ramp_chance": float 0.0-0.25
 21. "contrast_protect": boolean true/false — enable soft contrast protection (recommend true)
 22. "edit_narrative": A 3-5 sentence PERSONAL explanation of your creative vision. Explain WHY you chose this pacing, these fragments, this energy level. What story are you telling? What emotion should the viewer feel? Write as a creative director explaining their vision to a client.
 
@@ -329,18 +343,23 @@ def _sanitize_config(config, valid_transitions, valid_grades, valid_speeds):
         config["shuffle_intensity"] = 0.7
 
     # ── Per-chunk effect probabilities ────────────────────────────────
-    _clamp_chance(config, "reverse_chance", 0.0, 0.5, 0.1)
-    _clamp_chance(config, "punch_in_chance", 0.0, 0.7, 0.2)
-    _clamp_chance(config, "burst_frequency", 0.0, 1.0, 0.3)
-    _clamp_chance(config, "black_breath_chance", 0.0, 0.5, 0.1)
-    _clamp_chance(config, "hold_frame_chance", 0.0, 0.5, 0.1)
-    _clamp_chance(config, "micro_ramp_chance", 0.0, 0.5, 0.15)
+    _clamp_chance(config, "reverse_chance", 0.0, 0.15, 0.0)
+    _clamp_chance(config, "punch_in_chance", 0.0, 0.35, 0.18)
+    _clamp_chance(config, "burst_frequency", 0.0, 0.35, 0.12)
+    _clamp_chance(config, "black_breath_chance", 0.0, 0.08, 0.0)
+    _clamp_chance(config, "hold_frame_chance", 0.0, 0.12, 0.0)
+    _clamp_chance(config, "micro_ramp_chance", 0.0, 0.25, 0.12)
 
     # Edit narrative (keep as-is, just ensure it's a string)
     narrative = config.get("edit_narrative", "")
     if not isinstance(narrative, str):
         narrative = str(narrative)
     config["edit_narrative"] = narrative
+
+    selected_mood = config.get("selected_mood", "cinematic")
+    if not isinstance(selected_mood, str):
+        selected_mood = str(selected_mood)
+    config["selected_mood"] = selected_mood
 
     # ── Contrast protect flag ─────────────────────────────────────────
     cp = config.get("contrast_protect", True)
@@ -415,8 +434,14 @@ def ask_ollama_with_descriptions(model, user_prompt, video_summaries, vision_con
         "none", "slow_motion", "speed_up", "fast_start",
         "speed_up_end", "accelerate",
     ]
+    available_moods = [
+        "dreamy", "romantic", "calm", "nature", "elegant", "warm",
+        "minimal", "playful", "retro", "cinematic", "bold", "luxury",
+        "urban", "energetic", "intense", "hypnotic", "raw", "neon",
+        "editorial", "chaos",
+    ]
 
-    system = f"""You are a world-class cinematic video editor and advertising creative director with 20 years of experience creating award-winning commercials. You think in terms of story, emotion, visual rhythm, and SELLING products.
+    system = f"""You are a world-class product commercial director, film editor, and advertising creative director. You create premium edits that sell the product while keeping it believable, clean, and cinematic.
 
 SOURCE VIDEOS:
 {video_summaries}
@@ -424,45 +449,47 @@ SOURCE VIDEOS:
 {vision_context}
 
 PROFESSIONAL EDITING RULES:
-1. Use the VISUAL ANALYSIS above to make content-aware decisions.
-2. NEVER be monotonous — vary cut lengths EXTREMELY (0.3s to 4.0s in the same edit).
-3. Lead with the STRONGEST product shot. Close with a MEMORABLE angle.
+1. Use the VISUAL ANALYSIS above to choose the best mood from this list: {json.dumps(available_moods)}.
+2. Use that mood as the base edit language, then adapt it using the user's prompt.
+3. Lead with the STRONGEST believable product shot. Close with a memorable product angle.
 4. INTERLEAVE videos creatively — contrast wide with close-up, static with motion.
-5. Each transition serves a purpose:
+5. Editing should feel intentional and mostly invisible. Avoid random effects that call attention away from the product.
+6. Vary shot lengths musically, but do not make the whole edit frantic. Use short accents around motion/reveals and longer breathing cuts on product hero shots.
+7. Each transition serves a purpose:
    - hard_cut: Clean, sharp. Use for matching motion or rhythm.
-   - flash_white: Energy burst. Use at key product reveals.
-   - flash_black: Dramatic weight. Separates scenes.
+   - flash_white: Energy burst. Use sparingly at key product reveals.
+   - flash_black: Dramatic weight. Use rarely; too much feels choppy.
    - zoom_punch_in: Product impact. Punch INTO the hero shot.
    - whip_pan: Fast motion blur. Creates urgency.
    - cross_dissolve: Elegant blend. Best for similar lighting.
    - luma_fade: Luxury premium reveal through brightness.
-   - glitch_cut: Digital edge. Tech/gaming products.
-   - shake_cut: Camera impact. Action/sports energy.
-6. Use 4-6 DIFFERENT transitions for variety.
-7. Choose color grades that enhance the PRODUCT.
+   - glitch_cut: Digital edge. Only for tech/gaming/intentional style.
+   - shake_cut: Camera impact. Use rarely.
+8. Choose color grades that enhance the PRODUCT and preserve real material detail.
 
-⚠️ CRITICAL CONTRAST RULES:
+CRITICAL CONTRAST RULES:
 - NEVER use "high_contrast" — it crushed blacks and looks harsh.
 - Prefer "hollywood", "cinematic_warm", or "teal_orange" for premium look.
 - ALWAYS include "contrast_protect" in visual_effects.
 - The final look must be SOFT, CINEMATIC, and PROFESSIONAL — never harsh.
 
-🎬 CONTENT-DRIVEN RHYTHM (MOST IMPORTANT):
+CONTENT-DRIVEN RHYTHM:
 - Map the VISUAL CONTENT to the editing rhythm:
-  * Motion/action shots → rapid burst cuts (0.2-0.6s)
-  * Product hero/close-up shots → lingering breathing cuts (2-4s)
-  * Scene transitions → medium cuts with flash transitions
-- Every 3-5 seconds, the cutting rhythm MUST change.
-- variable_durations MUST show EXTREME variation: "0.3,2.5,0.4,3.0,0.5,1.8,0.3,4.0"
+  * Motion/action shots -> short accents (0.5-1.0s)
+  * Product hero/close-up shots -> lingering desirability cuts (2.5-4.0s)
+  * Scene/detail transitions -> medium cuts (1.2-2.0s)
+- Every 3-5 seconds, the rhythm should evolve, not stutter.
+- variable_durations should show polished variation: "1.0,2.6,0.8,1.6,3.0,0.9,2.2,1.2,3.5"
 - NEVER use uniform cut lengths — that looks robotic.
 
-8. ALWAYS add visual effects — chromatic_aberration, bloom, and contrast_protect at minimum.
+9. Visual effects must be restrained: bloom, film_grain, contrast_protect are usually enough. Use chromatic aberration lightly.
 
 ALL PARAMETERS (include EVERY key in your JSON):
 
+0. "selected_mood": one of {json.dumps(available_moods)}
 1. "cut_duration_mode": "variable"
 2. "fixed_cut_duration": float 0.5-10.0
-3. "variable_durations": comma-separated floats with EXTREME variation (e.g. "0.3,2.5,0.4,3.5,0.5,1.8,0.3,4.0")
+3. "variable_durations": comma-separated floats with polished variation (e.g. "1.0,2.6,0.8,1.6,3.0,0.9,2.2,1.2,3.5")
 4. "cut_pattern": comma-separated video numbers — interleave CREATIVELY based on content analysis
 5. "transitions": JSON array of 4-6 transitions
    Available: {json.dumps(available_transitions)}
@@ -476,12 +503,12 @@ ALL PARAMETERS (include EVERY key in your JSON):
 12. "min_chunk_duration": float 0.2-5.0
 13. "max_chunk_duration": float 0.5-5.0 (must be >= min)
 14. "shuffle_intensity": float 0.0-1.0 (0=sequential, 1=fully random)
-15. "reverse_chance": float 0.0-0.3
-16. "punch_in_chance": float 0.0-0.5
-17. "burst_frequency": float 0.0-1.0
-18. "black_breath_chance": float 0.0-0.3
-19. "hold_frame_chance": float 0.0-0.3
-20. "micro_ramp_chance": float 0.0-0.4
+15. "reverse_chance": float 0.0-0.15
+16. "punch_in_chance": float 0.0-0.35
+17. "burst_frequency": float 0.0-0.35
+18. "black_breath_chance": float 0.0-0.08
+19. "hold_frame_chance": float 0.0-0.12
+20. "micro_ramp_chance": float 0.0-0.25
 21. "contrast_protect": boolean true/false (recommend true)
 22. "edit_narrative": 3-5 sentences explaining your creative vision. Reference SPECIFIC shots from the analysis. Example: "I'm leading with Video 1's hero bottle shot because it has the strongest lighting, then cutting to Video 3's spray action for energy..."
 

@@ -13,7 +13,7 @@ import math
 import random
 from collections.abc import Mapping
 
-from .presets import MOODS, get_mood_names
+from .presets import MOODS
 from .transitions import join_segments
 from .color_grading import apply_color_grade, get_grade_names, apply_visual_effects
 from .ollama_bridge import list_ollama_models, ask_ollama, ask_ollama_with_descriptions, frames_to_base64
@@ -26,8 +26,6 @@ class DJ_AutoEditor:
 
     @classmethod
     def INPUT_TYPES(cls):
-        mood_list = get_mood_names() + ["llm_auto"]
-
         try:
             ollama_models = list_ollama_models()
         except Exception:
@@ -35,16 +33,11 @@ class DJ_AutoEditor:
 
         return {
             "required": {
-                "ai_director": (["ON", "OFF"], {
-                    "default": "ON",
-                    "tooltip": "\u26a0\ufe0f AI DIRECTOR: When ON, the AI controls ALL editing decisions based on video content. All manual settings below are IGNORED. Set to OFF for manual control.",
-                }),
                 "llm_model": (ollama_models, {"default": ollama_models[0]}),
-                "mood": (mood_list, {"default": "bold"}),
                 "llm_prompt": ("STRING", {
                     "default": "",
                     "multiline": True,
-                    "placeholder": "Optional: guide the AI (e.g. 'make it energetic and fast-paced'). Leave empty for fully automatic editing.",
+                    "placeholder": "Optional creative direction. Example: premium skincare, elegant but energetic, make the product feel real and desirable.",
                 }),
                 "images1": ("IMAGE",),
                 "video_info1": ("VHS_VIDEOINFO",),
@@ -53,67 +46,6 @@ class DJ_AutoEditor:
             },
             "optional": {
                 # Pacing & transition overrides
-                "pacing": (["as_mood", "slower", "much_slower", "faster", "much_faster"], {
-                    "default": "as_mood",
-                    "tooltip": "Override the pacing: affects speed and cut durations together",
-                }),
-                "transition_strength": (["as_mood", "subtle", "moderate", "dramatic", "extreme"], {
-                    "default": "as_mood",
-                    "tooltip": "Override transition intensity and duration",
-                }),
-                "audio_crossfade_ms": ("INT", {
-                    "default": 0, "min": 0, "max": 500, "step": 10,
-                    "tooltip": "Audio blend between cuts in milliseconds. 0=sharp cut",
-                }),
-                # ── Feature toggles ──────────────────────────────────
-                "reverse_clips": (["enable", "disable"], {
-                    "default": "enable",
-                    "tooltip": "Randomly reverse some fragment playback",
-                }),
-                "scale_punch_ins": (["enable", "disable"], {
-                    "default": "enable",
-                    "tooltip": "Random subtle zoom crop (102-108%) on fragments",
-                }),
-                "rhythm_bursts": (["enable", "disable"], {
-                    "default": "enable",
-                    "tooltip": "Insert rapid-fire 3-4 cut burst sequences",
-                }),
-                "black_breaths": (["enable", "disable"], {
-                    "default": "enable",
-                    "tooltip": "Insert 2-4 black frames between burst segments",
-                }),
-                "hold_frames": (["enable", "disable"], {
-                    "default": "enable",
-                    "tooltip": "Freeze last frame of some clips for impact",
-                }),
-                "jump_cuts": (["enable", "disable"], {
-                    "default": "enable",
-                    "tooltip": "Reorder fragments within same video for jump-cut feel",
-                }),
-                "micro_speed_ramps": (["enable", "disable"], {
-                    "default": "enable",
-                    "tooltip": "Per-clip slow-motion → snap speed ramps",
-                }),
-                "vision_analysis": (["enable", "disable"], {
-                    "default": "enable",
-                    "tooltip": "Use Florence-2 AI to analyze video content for smarter editing decisions",
-                }),
-                "vision_quality": (get_vision_quality_names(), {
-                    "default": "fast",
-                    "tooltip": "Vision analysis speed/quality: detailed (slowest) → balanced → fast (recommended) → turbo (fastest)",
-                }),
-                "distortion_removal": (["skip_frames", "freeze_frames", "disable"], {
-                    "default": "freeze_frames",
-                    "tooltip": "Detect and handle AI-generated distortion frames. Skip=shorter video, Freeze=replace with clean frame",
-                }),
-                "contrast_protect": (["enable", "disable"], {
-                    "default": "enable",
-                    "tooltip": "Soft contrast limiter — prevents crushed blacks and blown highlights in the final video",
-                }),
-                "phased_fragmentation": (["enable", "disable"], {
-                    "default": "enable",
-                    "tooltip": "Multi-phase rhythm: alternates between rapid bursts and breathing moments for dramatic frame count variation",
-                }),
                 # Source videos
                 "audio1": ("AUDIO",),
                 "audio2": ("AUDIO",),
@@ -691,59 +623,35 @@ class DJ_AutoEditor:
 
     # ─── Main execution ──────────────────────────────────────────────────
 
-    def auto_edit(self, ai_director, llm_model, mood, llm_prompt,
+    def auto_edit(self, llm_model, llm_prompt,
                   images1, video_info1, images2, video_info2,
                   **kwargs):
 
-        # ── AI Director Mode ──────────────────────────────────────────────
-        ai_director_on = (ai_director == "ON")
-        if ai_director_on:
-            print(f"\n{'='*60}")
-            print(f"[AutoEditor] \u26a0\ufe0f  AI DIRECTOR MODE: ON")
-            print(f"[AutoEditor]    All manual settings (mood, pacing, toggles) are IGNORED.")
-            print(f"[AutoEditor]    The AI will analyze your videos and decide everything.")
-            if llm_prompt and llm_prompt.strip():
-                print(f"[AutoEditor]    Your guidance: \"{llm_prompt.strip()[:100]}\"")
-            else:
-                print(f"[AutoEditor]    No prompt given \u2014 fully automatic mode.")
-            print(f"{'='*60}")
-            # Force LLM auto mode
-            mood = "llm_auto"
+        mood = "llm_auto"
+        pacing_mode = "as_mood"
+        transition_strength = "as_mood"
+        audio_crossfade_ms = 80
+        enable_reverse = False
+        enable_punch_in = True
+        enable_bursts = True
+        enable_black_breath = False
+        enable_hold = False
+        enable_jump_cuts = True
+        enable_micro_ramp = True
+        enable_vision = True
+        vision_quality = "balanced"
+        distortion_mode = "freeze_frames"
+        enable_contrast_protect = True
+        enable_phased = False
 
-        # Extract tweaks with safe defaults
-        if ai_director_on:
-            # AI Director overrides: ignore manual settings, enable everything
-            pacing_mode = "as_mood"  # LLM controls pacing directly
-            transition_strength = "as_mood"  # LLM controls transitions directly
-            audio_crossfade_ms = 50  # Always use a small crossfade for clean audio
-            enable_reverse = True
-            enable_punch_in = True
-            enable_bursts = True
-            enable_black_breath = True
-            enable_hold = True
-            enable_jump_cuts = True
-            enable_micro_ramp = True
-            enable_vision = True
-            vision_quality = kwargs.get("vision_quality", "fast")
-            distortion_mode = "freeze_frames"
-            enable_contrast_protect = True
-            enable_phased = True
+        print(f"\n{'='*60}")
+        print("[AutoEditor] AI DIRECTOR MODE: ALWAYS ON")
+        print("[AutoEditor] The node will analyze the footage, choose the mood/edit plan, and apply professional settings.")
+        if llm_prompt and llm_prompt.strip():
+            print(f"[AutoEditor] Creative direction: \"{llm_prompt.strip()[:140]}\"")
         else:
-            pacing_mode = kwargs.get("pacing", "as_mood")
-            transition_strength = kwargs.get("transition_strength", "as_mood")
-            audio_crossfade_ms = kwargs.get("audio_crossfade_ms", 0)
-            enable_reverse = kwargs.get("reverse_clips", "enable") == "enable"
-            enable_punch_in = kwargs.get("scale_punch_ins", "enable") == "enable"
-            enable_bursts = kwargs.get("rhythm_bursts", "enable") == "enable"
-            enable_black_breath = kwargs.get("black_breaths", "enable") == "enable"
-            enable_hold = kwargs.get("hold_frames", "enable") == "enable"
-            enable_jump_cuts = kwargs.get("jump_cuts", "enable") == "enable"
-            enable_micro_ramp = kwargs.get("micro_speed_ramps", "enable") == "enable"
-            enable_vision = kwargs.get("vision_analysis", "enable") == "enable"
-            vision_quality = kwargs.get("vision_quality", "fast")
-            distortion_mode = kwargs.get("distortion_removal", "freeze_frames")
-            enable_contrast_protect = kwargs.get("contrast_protect", "enable") == "enable"
-            enable_phased = kwargs.get("phased_fragmentation", "enable") == "enable"
+            print("[AutoEditor] No prompt given - fully automatic product-commercial direction.")
+        print(f"{'='*60}")
 
         # Extract optional sources
         audio1 = kwargs.get("audio1")
@@ -1325,6 +1233,38 @@ class DJ_AutoEditor:
 
     # ─── LLM config helper ───────────────────────────────────────────────
 
+    @staticmethod
+    def _professional_fallback_config():
+        """Premium automatic fallback when the LLM is unavailable."""
+        config = MOODS.get("cinematic", MOODS["bold"]).copy()
+        config.update({
+            "selected_mood": "cinematic",
+            "cut_duration_mode": "variable",
+            "variable_durations": "1.2,2.8,0.9,2.2,1.0,3.2,0.8,2.6,1.4,3.0",
+            "transitions": ["cross_dissolve", "luma_fade", "zoom_punch_in", "swipe_left", "hard_cut"],
+            "transition_frames": 10,
+            "transition_intensity": 0.78,
+            "speed_ramp": "none",
+            "speed_factor": 1.0,
+            "color_grade": "hollywood",
+            "visual_effects": ["bloom", "film_grain", "contrast_protect"],
+            "contrast_protect": True,
+            "min_chunk_duration": 0.8,
+            "max_chunk_duration": 3.2,
+            "shuffle_intensity": 0.55,
+            "reverse_chance": 0.0,
+            "punch_in_chance": 0.18,
+            "burst_frequency": 0.12,
+            "black_breath_chance": 0.0,
+            "hold_frame_chance": 0.0,
+            "micro_ramp_chance": 0.12,
+            "edit_narrative": (
+                "Automatic premium product edit: smooth visual rhythm, believable product presentation, "
+                "soft cinematic color, clean transitions, and selective movement accents."
+            ),
+        })
+        return config
+
     def _get_llm_config(self, llm_model, llm_prompt, video_summary_lines, all_images,
                         vision_context=""):
         """Ask the LLM for editing configuration.
@@ -1341,12 +1281,12 @@ class DJ_AutoEditor:
                               "maximize sales impact based on what you see in the footage.")
                 print("[AutoEditor] 🤖 AI Director: No prompt given — LLM deciding from video content alone")
             else:
-                print("[AutoEditor] ⚠️  LLM mode but no custom prompt — falling back to 'bold' mood")
-                return MOODS["bold"].copy()
+                print("[AutoEditor] LLM has no prompt or vision context - using premium fallback director config")
+                return self._professional_fallback_config()
 
         if "(ollama" in llm_model or "(no model" in llm_model:
-            print(f"[AutoEditor] ⚠️  Ollama unavailable ({llm_model}) — falling back to 'bold'")
-            return MOODS["bold"].copy()
+            print(f"[AutoEditor] Ollama unavailable ({llm_model}) - using premium fallback director config")
+            return self._professional_fallback_config()
 
         video_info_str = "\n".join(video_summary_lines)
 
@@ -1387,8 +1327,8 @@ class DJ_AutoEditor:
         )
 
         if config is None:
-            print("[AutoEditor] ⚠️  LLM returned no valid config — falling back to 'bold'")
-            return MOODS["bold"].copy()
+            print("[AutoEditor] LLM returned no valid config - using premium fallback director config")
+            return self._professional_fallback_config()
 
         if "cut_pattern" not in config:
             config["cut_pattern"] = "1,2,3,4,5,6"
