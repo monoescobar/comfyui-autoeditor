@@ -616,7 +616,12 @@ def detect_bpm(audio_dict):
     Returns estimated BPM (60-200 range).
     """
     waveform = audio_dict["waveform"]
-    sample_rate = audio_dict["sample_rate"]
+    try:
+        sample_rate = int(audio_dict["sample_rate"])
+    except (TypeError, ValueError):
+        return 120.0
+    if sample_rate <= 0:
+        return 120.0
 
     if waveform.dim() == 3:
         waveform = waveform.squeeze(0)
@@ -633,8 +638,10 @@ def detect_bpm(audio_dict):
         return bpm
 
     # Energy envelope in 10ms windows
-    hop = int(sample_rate * 0.01)
-    win = int(sample_rate * 0.02)
+    hop = max(1, int(sample_rate * 0.01))
+    win = max(hop, int(sample_rate * 0.02))
+    if len(audio) <= win:
+        return 120.0
     n_frames = max(1, (len(audio) - win) // hop)
 
     energy = np.zeros(n_frames)

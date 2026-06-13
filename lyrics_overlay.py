@@ -7,13 +7,14 @@ TikTok-optimized display styles. Supports LLM auto-styling.
 """
 
 import torch
+from collections.abc import Mapping
 
 from .lyrics_sync import align_lyrics, detect_bpm, fallback_align_lyrics, unload_whisper
 from .text_renderer import TextRenderer, DISPLAY_STYLES, LINE_MODES, POSITIONS
 from .ollama_bridge import list_ollama_models
 
 
-LYRICS_OVERLAY_NODE_VERSION = "v2026.06.13.2"
+LYRICS_OVERLAY_NODE_VERSION = "v2026.06.13.3"
 LYRICS_FONT_SCALE = 0.85
 
 
@@ -113,6 +114,37 @@ class DJ_LyricsOverlay:
     RETURN_NAMES = ("images_output", "audio_output", "video_info_output", "sync_report")
     RETURN_TYPES = ("IMAGE", "AUDIO", "VHS_VIDEOINFO", "STRING")
 
+    @staticmethod
+    def _safe_float(value, default=None):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _resolve_fps(cls, video_info, n_frames, fps_override=0.0):
+        override = cls._safe_float(fps_override, 0.0) or 0.0
+        if override > 0:
+            return override, f"manual override ({override:.1f})"
+
+        info = video_info if isinstance(video_info, Mapping) else {}
+        fps = cls._safe_float(info.get("loaded_fps"), 25.0) or 25.0
+        duration = cls._safe_float(info.get("loaded_duration"))
+        if duration is None:
+            duration = cls._safe_float(info.get("source_duration"))
+
+        if duration and duration > 0 and n_frames > 0:
+            inferred_fps = n_frames / duration
+            mismatch = abs(fps - inferred_fps) / max(inferred_fps, 1.0)
+            if 1.0 <= inferred_fps <= 120.0 and (fps <= 0 or fps > 60.0 or mismatch > 0.20):
+                return inferred_fps, f"duration-derived video_info ({inferred_fps:.1f})"
+
+        if fps <= 0 or fps > 120.0:
+            return 25.0, "safe default 25fps (invalid video_info fps)"
+        if isinstance(video_info, Mapping):
+            return fps, f"video_info ({fps:.1f})"
+        return 25.0, "default 25fps (connect video_info for accuracy)"
+
     def overlay_lyrics(self, song_audio, lyrics_text, video_frames,
                        display_style, whisper_model, **kwargs):
 
@@ -120,7 +152,7 @@ class DJ_LyricsOverlay:
         llm_model = kwargs.get("llm_model", "")
         timing_offset = kwargs.get("timing_offset_ms", 0)
         video_info = kwargs.get("video_info", None)
-        fps_override = kwargs.get("fps_override", 0.0)
+        fps_override = self._safe_float(kwargs.get("fps_override", 0.0), 0.0) or 0.0
 
         # ── Determine FPS (critical for sync!) ───────────────────────
         n_frames = video_frames.shape[0]
@@ -136,8 +168,8 @@ class DJ_LyricsOverlay:
         if fps_override and fps_override > 0:
             fps = fps_override
             fps_source = f"manual override ({fps:.1f})"
-        elif video_info is not None:
-            fps = video_info.get("loaded_fps", 25)
+        elif isinstance(video_info, Mapping):
+            fps = self._safe_float(video_info.get("loaded_fps", 25), 25.0) or 25.0
             if isinstance(fps, str):
                 fps = float(fps)
             fps_source = f"video_info ({fps:.1f})"
@@ -147,6 +179,7 @@ class DJ_LyricsOverlay:
             fps = 25.0
             fps_source = "default 25fps (connect video_info for accuracy)"
 
+        fps, fps_source = self._resolve_fps(video_info, n_frames, fps_override)
         video_duration = n_frames / fps
 
         # Build a video_info dict for pass-through if none provided

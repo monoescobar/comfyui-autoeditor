@@ -20,7 +20,7 @@ from .ollama_bridge import list_ollama_models, ask_ollama, ask_ollama_with_descr
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.13.1"
+AUTOEDITOR_NODE_VERSION = "v2026.06.13.2"
 MAX_FRAME_BATCH_ELEMENTS = 12_000_000
 
 
@@ -1128,7 +1128,10 @@ class DJ_AutoEditor:
                 all_images[idx] = img
                 all_audio[idx] = aud
                 all_info[idx] = info if info is not None else {
-                    "loaded_fps": video_info1.get("loaded_fps", 25),
+                    "loaded_fps": self._safe_float(
+                        video_info1.get("loaded_fps", 25) if isinstance(video_info1, Mapping) else 25,
+                        25.0,
+                    ),
                     "loaded_frame_count": img.shape[0],
                 }
 
@@ -1195,7 +1198,9 @@ class DJ_AutoEditor:
         for idx in sorted(all_images.keys()):
             n_frames = all_images[idx].shape[0]
             total_source_frames += n_frames
-            vid_fps = all_info[idx].get("loaded_fps", 25) if idx in all_info else 25
+            vid_fps, vid_fps_note = self._reliable_fps(all_info.get(idx), all_images[idx], default=fps)
+            if vid_fps_note:
+                print(f"[AutoEditor] Video {idx} {vid_fps_note}")
             dur = n_frames / vid_fps
             line = f"  Video {idx}: {n_frames} frames ({dur:.1f}s)"
             print(f"[AutoEditor] {line}")

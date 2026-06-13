@@ -14,6 +14,8 @@ import urllib.request
 import urllib.error
 
 OLLAMA_BASE = "http://localhost:11434"
+AUTOEDITOR_LLM_TIMEOUT_SECONDS = 75
+LYRICS_LLM_TIMEOUT_SECONDS = 35
 
 
 def list_ollama_models():
@@ -250,7 +252,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT. No markdown, no explanation outside the J
         print(f"[AutoEditor-LLM] 🤖 Querying '{model}'...")
         print(f"[AutoEditor-LLM] Prompt: \"{user_prompt[:200]}\"")
 
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=AUTOEDITOR_LLM_TIMEOUT_SECONDS) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
             response_text = raw.get("response", "")
             print(f"[AutoEditor-LLM] Response: {response_text[:500]}")
@@ -560,7 +562,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT."""
         print(f"[AutoEditor-LLM] 🤖 Querying '{model}' with vision descriptions (text-only)...")
         print(f"[AutoEditor-LLM] Prompt: \"{user_prompt[:200]}\"")
 
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=AUTOEDITOR_LLM_TIMEOUT_SECONDS) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
             response_text = raw.get("response", "")
             print(f"[AutoEditor-LLM] Response: {response_text[:500]}")
@@ -658,7 +660,7 @@ RESPOND WITH ONLY JSON containing:
         )
 
         print(f"[LyricsOverlay-LLM] 🤖 Querying '{model}' for style...")
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=LYRICS_LLM_TIMEOUT_SECONDS) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
             config = json.loads(raw.get("response", "{}"))
 
