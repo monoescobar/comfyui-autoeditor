@@ -165,8 +165,8 @@ class TextRenderer:
         elif self.position == "center":
             return max(margin, (h - total_h) // 2)
         elif self.position == "lower_third":
-            # Text starts at ~65% of frame, clamped to stay within bounds
-            y = int(h * 0.65)
+            # Text sits around one third up from the bottom, slightly lower.
+            y = int(h * 0.68)
             return max(margin, min(y, h - total_h - margin))
         else:  # bottom
             return max(margin, h - total_h - margin)

@@ -10,6 +10,7 @@ import os
 import re
 import math
 import difflib
+import unicodedata
 import torch
 import numpy as np
 
@@ -42,6 +43,36 @@ def _audio_duration_seconds(audio_dict):
         return float(waveform.shape[-1]) / sample_rate
     except Exception:
         return 0.0
+
+
+def _normalize_word(text):
+    """Normalize lyrics/transcript words for matching, including accents."""
+    text = unicodedata.normalize("NFKD", str(text).lower())
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"[^\w']", "", text, flags=re.UNICODE)
+
+
+def _lyrics_initial_prompt(lyrics_text, max_chars=1000):
+    """Give Whisper a short lyric hint so song transcription follows the supplied words."""
+    cleaned = " ".join(line.strip() for line in lyrics_text.splitlines() if line.strip())
+    return cleaned[:max_chars] if cleaned else None
+
+
+def _transcribe_with_lyrics_hint(model, audio_np, lyrics_text):
+    kwargs = {
+        "word_timestamps": True,
+        "temperature": 0.0,
+        "condition_on_previous_text": False,
+    }
+    prompt = _lyrics_initial_prompt(lyrics_text)
+    if prompt:
+        kwargs["initial_prompt"] = prompt
+    try:
+        return model.transcribe(audio_np, **kwargs)
+    except TypeError:
+        kwargs.pop("initial_prompt", None)
+        kwargs.pop("condition_on_previous_text", None)
+        return model.transcribe(audio_np, **kwargs)
 
 
 def _apply_timing_offset(aligned_lines, timing_offset_ms):
@@ -153,11 +184,7 @@ def _align_lyrics_whisper_legacy(audio_dict, lyrics_text, model_size="base", tim
 
     # ── Transcribe with word timestamps ──────────────────────────────
     print(f"[LyricsSync] 🎤 Transcribing audio...")
-    result = _whisper_model.transcribe(
-        audio_np,
-        word_timestamps=True,
-        language="en",
-    )
+    result = _transcribe_with_lyrics_hint(_whisper_model, audio_np, lyrics_text)
 
     # Extract word timestamps
     whisper_words = []
@@ -236,7 +263,7 @@ def _parse_lyrics(lyrics_text):
             continue
         # Extract words (keep original case for display, lowercase for matching)
         display_words = stripped.split()
-        match_words = [re.sub(r"[^a-zA-Z']", "", w).lower() for w in display_words]
+        match_words = [_normalize_word(w) for w in display_words]
         # Filter out empty matches but keep display words aligned
         filtered = [(d, m) for d, m in zip(display_words, match_words) if m]
         if filtered:
@@ -264,13 +291,14 @@ def _align_to_whisper(lines, whisper_words, audio_duration):
             })
 
     # Flatten Whisper words for matching
-    whisper_normalized = [re.sub(r"[^a-zA-Z']", "", w["word"]).lower()
-                          for w in whisper_words]
+    whisper_normalized = [_normalize_word(w["word"]) for w in whisper_words]
 
     lyrics_normalized = [w["word"] for w in flat_lyrics]
 
     # ── Pass 1: Exact matching via SequenceMatcher ───────────────────
-    matcher = difflib.SequenceMatcher(None, lyrics_normalized, whisper_normalized)
+    matcher = difflib.SequenceMatcher(
+        None, lyrics_normalized, whisper_normalized, autojunk=False
+    )
 
     timestamps = [None] * len(flat_lyrics)
     whisper_used = [False] * len(whisper_words)
@@ -285,6 +313,7 @@ def _align_to_whisper(lines, whisper_words, audio_duration):
                     "start": whisper_words[wi]["start"],
                     "end": whisper_words[wi]["end"],
                     "interpolated": False,
+                    "whisper_idx": wi,
                 }
                 whisper_used[wi] = True
 
@@ -304,9 +333,9 @@ def _align_to_whisper(lines, whisper_words, audio_duration):
             # Estimate where this word should be in the Whisper sequence
             expected_wi = int(li * ratio)
             # Search window: ±20% of total whisper words, at least ±5
-            window = max(5, int(len(whisper_words) * 0.2))
+            window = max(4, min(12, int(len(whisper_words) * 0.04)))
 
-            best_score = 0.55  # Minimum threshold for fuzzy match
+            best_score = 0.75 if len(lw) > 4 else 0.88
             best_wi = None
 
             for wi in range(max(0, expected_wi - window),
@@ -317,20 +346,39 @@ def _align_to_whisper(lines, whisper_words, audio_duration):
                 # Quick length check before expensive ratio calculation
                 if abs(len(lw) - len(ww)) > max(len(lw), len(ww)) * 0.5:
                     continue
-                score = difflib.SequenceMatcher(None, lw, ww).ratio()
+                score = difflib.SequenceMatcher(None, lw, ww, autojunk=False).ratio()
                 if score > best_score:
                     best_score = score
                     best_wi = wi
 
             if best_wi is not None:
+                prev_wi = -1
+                for prev_li in range(li - 1, -1, -1):
+                    prev_ts = timestamps[prev_li]
+                    if prev_ts is not None and "whisper_idx" in prev_ts:
+                        prev_wi = prev_ts["whisper_idx"]
+                        break
+                next_wi = len(whisper_words)
+                for next_li in range(li + 1, len(timestamps)):
+                    next_ts = timestamps[next_li]
+                    if next_ts is not None and "whisper_idx" in next_ts:
+                        next_wi = next_ts["whisper_idx"]
+                        break
+                if best_wi <= prev_wi or best_wi >= next_wi:
+                    continue
                 timestamps[li] = {
                     "start": whisper_words[best_wi]["start"],
                     "end": whisper_words[best_wi]["end"],
                     "interpolated": False,
+                    "whisper_idx": best_wi,
                 }
                 whisper_used[best_wi] = True
 
-    fuzzy_matches = sum(1 for t in timestamps if t is not None) - exact_matches
+    _drop_non_monotonic_matches(timestamps)
+
+    matched_after_guard = sum(1 for t in timestamps if t is not None)
+    exact_matches = min(exact_matches, matched_after_guard)
+    fuzzy_matches = max(0, matched_after_guard - exact_matches)
     total = len(flat_lyrics)
     print(f"[LyricsSync] Match stats: {exact_matches} exact + {fuzzy_matches} fuzzy "
           f"= {exact_matches + fuzzy_matches}/{total} "
@@ -366,6 +414,18 @@ def _align_to_whisper(lines, whisper_words, audio_duration):
         })
 
     return result
+
+
+def _drop_non_monotonic_matches(timestamps):
+    """Discard rare bad anchors that would make lyrics jump backward in time."""
+    last_end = -1.0
+    for i, ts in enumerate(timestamps):
+        if ts is None:
+            continue
+        if ts["start"] < last_end - 0.05:
+            timestamps[i] = None
+        else:
+            last_end = max(last_end, ts["end"])
 
 
 def _interpolate_timestamps(timestamps, duration):
@@ -464,11 +524,7 @@ def align_lyrics(audio_dict, lyrics_text, model_size="base", timing_offset_ms=0)
             print(f"[LyricsSync] Whisper '{model_size}' loaded")
 
         print("[LyricsSync] Transcribing audio...")
-        result = _whisper_model.transcribe(
-            audio_np,
-            word_timestamps=True,
-            language="en",
-        )
+        result = _transcribe_with_lyrics_hint(_whisper_model, audio_np, lyrics_text)
 
         whisper_words = []
         for segment in result.get("segments", []):

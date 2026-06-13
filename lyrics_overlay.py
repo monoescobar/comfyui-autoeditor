@@ -13,7 +13,7 @@ from .text_renderer import TextRenderer, DISPLAY_STYLES, LINE_MODES, POSITIONS
 from .ollama_bridge import list_ollama_models
 
 
-LYRICS_OVERLAY_NODE_VERSION = "v2026.06.12.4"
+LYRICS_OVERLAY_NODE_VERSION = "v2026.06.13.1"
 LYRICS_FONT_SCALE = 0.85
 
 
@@ -81,7 +81,7 @@ class DJ_LyricsOverlay:
                     "tooltip": "Active/highlighted word color as hex (e.g. #FFD700 for gold)",
                 }),
                 "text_position": (POSITIONS, {
-                    "default": "bottom",
+                    "default": "lower_third",
                     "tooltip": "Vertical position of text on the video",
                 }),
                 "text_alignment": (["left", "center", "right"], {
@@ -243,7 +243,7 @@ class DJ_LyricsOverlay:
             "font_family": kwargs.get("font_family", "arial"),
             "text_color": kwargs.get("text_color", "#FFFFFF"),
             "highlight_color": kwargs.get("highlight_color", "#FFD700"),
-            "text_position": kwargs.get("text_position", "bottom"),
+            "text_position": kwargs.get("text_position", "lower_third"),
             "text_alignment": kwargs.get("text_alignment", "center"),
             "outline_thickness": kwargs.get("outline_thickness", 3),
             "outline_color": kwargs.get("outline_color", "#000000"),
@@ -257,6 +257,8 @@ class DJ_LyricsOverlay:
         config = dict(config)
         raw_size = int(config.get("font_size", 42))
         config["font_size"] = max(16, int(round(raw_size * LYRICS_FONT_SCALE)))
+        if config.get("text_position") == "bottom":
+            config["text_position"] = "lower_third"
         return config
 
     def _build_report(self, aligned, bpm, config, n_frames, fps):
