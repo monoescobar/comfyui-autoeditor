@@ -366,6 +366,36 @@ class TextRenderer:
             if timestamp >= word_info["start"]
         ]
 
+    def _line_layout(self, line, frame_w, frame_h):
+        """Lay out the full line once so visible words do not re-center over time."""
+        words = [w["word"] for w in line["words"]]
+        sizes = self._measure_words(words)
+        if not sizes:
+            return [], [], []
+        text_h = max(s[1] for s in sizes)
+        n_rows = self._get_wrapped_row_count(words, sizes, frame_w)
+        y = self._get_y_base(frame_h, text_h, n_rows)
+        positions = self._word_positions(words, sizes, frame_w, y)
+        return words, sizes, positions
+
+    def _visible_line_layout(self, line, timestamp, frame_w, frame_h):
+        """Return visible words using stable positions from the complete lyric line."""
+        visible_items = self._visible_word_items(line, timestamp)
+        if not visible_items:
+            return [], [], [], []
+
+        all_words, all_sizes, all_positions = self._line_layout(line, frame_w, frame_h)
+        words = []
+        sizes = []
+        positions = []
+        for original_idx, _ in visible_items:
+            if original_idx >= len(all_words):
+                continue
+            words.append(all_words[original_idx])
+            sizes.append(all_sizes[original_idx])
+            positions.append(all_positions[original_idx])
+        return visible_items, words, sizes, positions
+
     # ── Main render entry point ──────────────────────────────────────
 
     def render_frame(self, frame_tensor, timestamp, aligned_lyrics, bpm=120.0):
@@ -410,15 +440,11 @@ class TextRenderer:
 
     def _style_karaoke(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        visible_items = self._visible_word_items(line, ctx["timestamp"])
-        words = [w["word"] for _, w in visible_items]
-        sizes = self._measure_words(words)
+        visible_items, words, sizes, positions = self._visible_line_layout(
+            line, ctx["timestamp"], ctx["w"], ctx["h"]
+        )
         if not sizes:
             return
-        text_h = max(s[1] for s in sizes)
-        n_rows = self._get_wrapped_row_count(words, sizes, ctx["w"])
-        y = self._get_y_base(ctx["h"], text_h, n_rows)
-        positions = self._word_positions(words, sizes, ctx["w"], y)
 
         for (original_idx, w_info), word, pos in zip(visible_items, words, positions):
             if pos is None:
@@ -442,15 +468,11 @@ class TextRenderer:
 
     def _style_subtitles(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        visible_items = self._visible_word_items(line, ctx["timestamp"])
-        words = [w["word"] for _, w in visible_items]
-        sizes = self._measure_words(words)
+        visible_items, words, sizes, positions = self._visible_line_layout(
+            line, ctx["timestamp"], ctx["w"], ctx["h"]
+        )
         if not sizes:
             return
-        text_h = max(s[1] for s in sizes)
-        n_rows = self._get_wrapped_row_count(words, sizes, ctx["w"])
-        y = self._get_y_base(ctx["h"], text_h, n_rows)
-        positions = self._word_positions(words, sizes, ctx["w"], y)
 
         fade_dur = 0.15
         line_alpha = 255
@@ -516,16 +538,11 @@ class TextRenderer:
 
     def _style_typewriter(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        visible_items = self._visible_word_items(line, ctx["timestamp"])
-        visible_words = [w["word"] for _, w in visible_items]
-        visible_sizes = self._measure_words(visible_words)
+        visible_items, visible_words, visible_sizes, positions = self._visible_line_layout(
+            line, ctx["timestamp"], ctx["w"], ctx["h"]
+        )
         if not visible_sizes:
             return
-
-        text_h = max(s[1] for s in visible_sizes)
-        n_rows = self._get_wrapped_row_count(visible_words, visible_sizes, ctx["w"])
-        y = self._get_y_base(ctx["h"], text_h, n_rows)
-        positions = self._word_positions(visible_words, visible_sizes, ctx["w"], y)
 
         for i, (word, pos) in enumerate(zip(visible_words, positions)):
             if pos is None:
@@ -545,15 +562,11 @@ class TextRenderer:
 
     def _style_word_wave(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        visible_items = self._visible_word_items(line, ctx["timestamp"])
-        words = [w["word"] for _, w in visible_items]
-        sizes = self._measure_words(words)
+        visible_items, words, sizes, positions = self._visible_line_layout(
+            line, ctx["timestamp"], ctx["w"], ctx["h"]
+        )
         if not sizes:
             return
-        text_h = max(s[1] for s in sizes)
-        n_rows = self._get_wrapped_row_count(words, sizes, ctx["w"])
-        y_base = self._get_y_base(ctx["h"], text_h, n_rows)
-        positions = self._word_positions(words, sizes, ctx["w"], y_base)
 
         beat_dur = 60.0 / max(ctx["bpm"], 60)
 
@@ -577,15 +590,11 @@ class TextRenderer:
 
     def _style_glow_pulse(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        visible_items = self._visible_word_items(line, ctx["timestamp"])
-        words = [w["word"] for _, w in visible_items]
-        sizes = self._measure_words(words)
+        visible_items, words, sizes, positions = self._visible_line_layout(
+            line, ctx["timestamp"], ctx["w"], ctx["h"]
+        )
         if not sizes:
             return
-        text_h = max(s[1] for s in sizes)
-        n_rows = self._get_wrapped_row_count(words, sizes, ctx["w"])
-        y = self._get_y_base(ctx["h"], text_h, n_rows)
-        positions = self._word_positions(words, sizes, ctx["w"], y)
 
         beat_dur = 60.0 / max(ctx["bpm"], 60)
 
@@ -615,15 +624,11 @@ class TextRenderer:
 
     def _style_slide_in(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        visible_items = self._visible_word_items(line, ctx["timestamp"])
-        words = [w["word"] for _, w in visible_items]
-        sizes = self._measure_words(words)
+        visible_items, words, sizes, positions = self._visible_line_layout(
+            line, ctx["timestamp"], ctx["w"], ctx["h"]
+        )
         if not sizes:
             return
-        text_h = max(s[1] for s in sizes)
-        n_rows = self._get_wrapped_row_count(words, sizes, ctx["w"])
-        y = self._get_y_base(ctx["h"], text_h, n_rows)
-        positions = self._word_positions(words, sizes, ctx["w"], y)
 
         slide_dur = 0.3
         elapsed = ctx["timestamp"] - line["line_start"]
@@ -671,18 +676,12 @@ class TextRenderer:
     # ── Style 9: Fade Flow ───────────────────────────────────────────
 
     def _style_fade_flow(self, overlay, draw, ctx):
-        lyrics = ctx["lyrics"]
-        li = ctx["line_idx"]
-        text_h = self.font.getbbox("Ay")[3] - self.font.getbbox("Ay")[1]
-        line = lyrics[li]
-        visible_items = self._visible_word_items(line, ctx["timestamp"])
-        words = [w["word"] for _, w in visible_items]
-        sizes = self._measure_words(words)
+        line = ctx["lyrics"][ctx["line_idx"]]
+        visible_items, words, sizes, positions = self._visible_line_layout(
+            line, ctx["timestamp"], ctx["w"], ctx["h"]
+        )
         if not sizes:
             return
-        n_rows = self._get_wrapped_row_count(words, sizes, ctx["w"])
-        y = self._get_y_base(ctx["h"], text_h, n_rows)
-        positions = self._word_positions(words, sizes, ctx["w"], y)
         for word, pos in zip(words, positions):
             if pos is None:
                 continue
@@ -692,15 +691,11 @@ class TextRenderer:
 
     def _style_neon_flash(self, overlay, draw, ctx):
         line = ctx["lyrics"][ctx["line_idx"]]
-        visible_items = self._visible_word_items(line, ctx["timestamp"])
-        words = [w["word"] for _, w in visible_items]
-        sizes = self._measure_words(words)
+        visible_items, words, sizes, positions = self._visible_line_layout(
+            line, ctx["timestamp"], ctx["w"], ctx["h"]
+        )
         if not sizes:
             return
-        text_h = max(s[1] for s in sizes)
-        n_rows = self._get_wrapped_row_count(words, sizes, ctx["w"])
-        y = self._get_y_base(ctx["h"], text_h, n_rows)
-        positions = self._word_positions(words, sizes, ctx["w"], y)
 
         # Neon glow layers
         for blur_pass in [12, 6]:

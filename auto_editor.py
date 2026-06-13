@@ -20,7 +20,7 @@ from .ollama_bridge import list_ollama_models, ask_ollama, ask_ollama_with_descr
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.12.5"
+AUTOEDITOR_NODE_VERSION = "v2026.06.13.1"
 MAX_FRAME_BATCH_ELEMENTS = 12_000_000
 
 
@@ -478,6 +478,46 @@ class DJ_AutoEditor:
             "guard_mode": guard_mode,
             "bytes_per_frame": bytes_per_frame,
         }
+
+    @staticmethod
+    def _safe_float(value, default=None):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _reliable_fps(video_info, frames, default=25.0):
+        """Use duration-derived FPS when node metadata is obviously inconsistent."""
+        info = video_info if isinstance(video_info, Mapping) else {}
+        fps = DJ_AutoEditor._safe_float(info.get("loaded_fps"), default)
+        if fps is None:
+            fps = default
+
+        frame_count = DJ_AutoEditor._safe_float(
+            info.get("loaded_frame_count"),
+            float(frames.shape[0]) if hasattr(frames, "shape") else None,
+        )
+        if not frame_count or frame_count <= 0:
+            frame_count = float(frames.shape[0]) if hasattr(frames, "shape") else 0.0
+
+        duration = DJ_AutoEditor._safe_float(info.get("loaded_duration"))
+        if duration is None:
+            duration = DJ_AutoEditor._safe_float(info.get("source_duration"))
+
+        if duration and duration > 0 and frame_count > 0:
+            inferred_fps = frame_count / duration
+            fps_mismatch = abs(fps - inferred_fps) / max(inferred_fps, 1.0)
+            if 1.0 <= inferred_fps <= 120.0 and (fps <= 0 or fps > 60.0 or fps_mismatch > 0.20):
+                note = (
+                    f"FPS safety: using duration-derived {inferred_fps:.2f}fps "
+                    f"instead of metadata {fps:.2f}fps"
+                )
+                return inferred_fps, note
+
+        if fps <= 0 or fps > 120.0:
+            return default, f"FPS safety: using default {default:.2f}fps instead of metadata {fps:.2f}fps"
+        return fps, ""
 
     @staticmethod
     def _score_source_videos(all_images, vision_descriptions=None):
@@ -1095,9 +1135,11 @@ class DJ_AutoEditor:
         n_videos = len(all_images)
 
         # ── Get FPS ───────────────────────────────────────────────────────
-        fps = all_info[1].get("loaded_fps", 25)
-        if isinstance(fps, str):
-            fps = float(fps)
+        fps, fps_note = self._reliable_fps(all_info.get(1), images1)
+        fps_notes = []
+        if fps_note:
+            fps_notes.append(fps_note)
+            print(f"[AutoEditor] {fps_note}")
 
         # ── AI Distortion Detection & Removal ────────────────────────────
         if distortion_mode != "disable":
@@ -1196,7 +1238,7 @@ class DJ_AutoEditor:
         )
 
         # ── Apply pacing override ─────────────────────────────────────────
-        tweaks_applied = list(director_notes)
+        tweaks_applied = list(director_notes) + fps_notes
 
         PACING_PRESETS = {
             "as_mood": {"speed_mult": 1.0, "duration_mult": 1.0, "chunk_mult": 1.0},
@@ -1569,7 +1611,7 @@ class DJ_AutoEditor:
             "loaded_duration": final_duration,
             "loaded_width": target_w,
             "loaded_height": target_h,
-            "source_fps": video_info1.get("source_fps", fps),
+            "source_fps": fps,
             "source_frame_count": final_frames,
             "source_duration": final_duration,
             "source_width": target_w,

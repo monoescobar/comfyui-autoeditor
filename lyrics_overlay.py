@@ -13,7 +13,7 @@ from .text_renderer import TextRenderer, DISPLAY_STYLES, LINE_MODES, POSITIONS
 from .ollama_bridge import list_ollama_models
 
 
-LYRICS_OVERLAY_NODE_VERSION = "v2026.06.13.1"
+LYRICS_OVERLAY_NODE_VERSION = "v2026.06.13.2"
 LYRICS_FONT_SCALE = 0.85
 
 
@@ -231,7 +231,7 @@ class DJ_LyricsOverlay:
         # ── Build report ─────────────────────────────────────────────
         report = self._build_report(aligned, bpm, config, n_frames, fps)
 
-        print(f"\n[LyricsOverlay] ✅ Complete!")
+        print(f"\n[LyricsOverlay] Complete!")
         print(f"{'='*60}\n")
 
         return (result, song_audio, video_info, report)
