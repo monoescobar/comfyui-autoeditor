@@ -16,11 +16,18 @@ from collections.abc import Mapping
 from .presets import MOODS
 from .transitions import join_segment_sequence
 from .color_grading import apply_color_grade, get_grade_names, apply_visual_effects
-from .ollama_bridge import list_ollama_models, ask_ollama, ask_ollama_with_descriptions, frames_to_base64
+from .ollama_bridge import (
+    ACE_KEY_SCALES,
+    ACE_TIME_SIGNATURES,
+    list_ollama_models,
+    ask_ollama,
+    ask_ollama_with_descriptions,
+    frames_to_base64,
+)
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.13.2"
+AUTOEDITOR_NODE_VERSION = "v2026.06.15.1"
 MAX_FRAME_BATCH_ELEMENTS = 12_000_000
 
 
@@ -53,6 +60,11 @@ class DJ_AutoEditor:
                     "default": "FAST",
                     "tooltip": "Controls Florence-2 video understanding. ON=best quality/slow, FAST=fewer keyframes, OFF=skip vision analysis.",
                 }),
+                "lyrics_text": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "placeholder": "Optional lyrics for music direction. Auto Editor uses this with video mood and BPM to recommend ACE-Step keyscale, time signature, and tags.",
+                }),
                 # Source videos
                 "audio1": ("AUDIO",),
                 "audio2": ("AUDIO",),
@@ -76,8 +88,9 @@ class DJ_AutoEditor:
     RETURN_NAMES = (
         "images_output", "audio_output", "video_info_output", "edit_report",
         "vision_descriptions", "output_frame_count", "recommended_bpm",
+        "recommended_keyscale", "recommended_timesignature", "recommended_music_tags",
     )
-    RETURN_TYPES = ("IMAGE", "AUDIO", "VHS_VIDEOINFO", "STRING", "STRING", "INT", "INT")
+    RETURN_TYPES = ("IMAGE", "AUDIO", "VHS_VIDEOINFO", "STRING", "STRING", "INT", "INT", "STRING", "INT", "STRING")
 
     # ─── Mood descriptions for the edit report ────────────────────────────
     MOOD_DESCRIPTIONS = {
@@ -646,6 +659,131 @@ class DJ_AutoEditor:
         return int(round(bpm / 2) * 2)
 
     @staticmethod
+    def _normalize_keyscale(value, default):
+        if isinstance(value, str):
+            clean = value.replace("NI ", "").strip()
+            clean = " ".join(clean.split())
+            for keyscale in ACE_KEY_SCALES:
+                if clean.lower() == keyscale.lower():
+                    return keyscale
+        return default
+
+    @staticmethod
+    def _normalize_timesignature(value, default):
+        if isinstance(value, str):
+            value = value.strip()
+            if "/" in value:
+                value = value.split("/", 1)[0]
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = default
+        return value if value in ACE_TIME_SIGNATURES else default
+
+    @staticmethod
+    def _fallback_music_direction(config, bpm, lyrics_text):
+        """Choose ACE-Step music metadata from mood, BPM, and lyric intent."""
+        mood = str(config.get("selected_mood", "cinematic")).lower()
+        lyrics_lower = (lyrics_text or "").lower()
+
+        mood_keyscale = {
+            "dreamy": "Db major",
+            "romantic": "Bb major",
+            "calm": "C major",
+            "nature": "G major",
+            "elegant": "F minor",
+            "warm": "A major",
+            "minimal": "C major",
+            "playful": "D major",
+            "retro": "A minor",
+            "cinematic": "D minor",
+            "bold": "G minor",
+            "luxury": "F minor",
+            "urban": "G minor",
+            "energetic": "F# minor",
+            "intense": "D# minor",
+            "hypnotic": "E minor",
+            "raw": "A minor",
+            "neon": "G# minor",
+            "editorial": "Bb minor",
+            "chaos": "F# minor",
+        }
+        keyscale = mood_keyscale.get(mood, "C major")
+
+        bright_words = ("fresh", "happy", "joy", "sun", "clean", "bright", "love", "smile", "new")
+        dark_words = ("night", "dark", "desire", "danger", "mystery", "power", "drama", "luxury", "secret")
+        if any(word in lyrics_lower for word in bright_words) and mood not in {"luxury", "cinematic", "intense", "neon"}:
+            root = keyscale.split()[0]
+            keyscale = f"{root} major" if f"{root} major" in ACE_KEY_SCALES else "C major"
+        elif any(word in lyrics_lower for word in dark_words):
+            root = keyscale.split()[0]
+            keyscale = f"{root} minor" if f"{root} minor" in ACE_KEY_SCALES else "A minor"
+
+        if mood in {"romantic"}:
+            timesignature = 3
+        elif mood in {"luxury", "cinematic", "elegant", "dreamy", "hypnotic", "editorial"} and bpm <= 120:
+            timesignature = 6
+        elif mood in {"energetic", "intense", "urban", "bold", "chaos"} and bpm >= 128:
+            timesignature = 2
+        else:
+            timesignature = 4
+
+        style_tags = {
+            "dreamy": "dreamy polished pop, airy pads, soft percussion, floating hook",
+            "romantic": "romantic elegant pop, warm chords, graceful rhythm, emotional melody",
+            "calm": "clean wellness pop, soft groove, organic percussion, gentle premium mood",
+            "nature": "organic cinematic pop, natural percussion, warm acoustic textures",
+            "elegant": "elegant luxury commercial, silky bass, refined piano, glossy cinematic groove",
+            "warm": "warm friendly pop, cozy chords, soft beat, inviting product ad",
+            "minimal": "minimal modern commercial, clean synth pulse, crisp restrained beat",
+            "playful": "playful upbeat pop, bright synths, catchy bounce, colorful ad hook",
+            "retro": "retro modern disco pop, analog warmth, tasteful groove, nostalgic shine",
+            "cinematic": "cinematic premium trailer pop, deep pulse, emotional rise, luxury reveal",
+            "bold": "bold modern ad music, punchy drums, confident bass, sharp product hook",
+            "luxury": "luxury cinematic pop, elegant strings, soft bloom, premium desire, glossy mix",
+            "urban": "urban fashion beat, sleek bass, street-luxury drums, confident rhythm",
+            "energetic": "energetic TikTok commercial pop, driving drums, memorable hook, sales lift",
+            "intense": "intense action commercial, heavy pulse, aggressive rhythm, powerful drop",
+            "hypnotic": "hypnotic premium electronic, pulsing synths, sensual loop, immersive groove",
+            "raw": "raw documentary commercial, textured drums, authentic groove, analog grit",
+            "neon": "neon electronic pop, glossy synths, club pulse, futuristic product energy",
+            "editorial": "editorial fashion commercial, stylish bassline, luxury runway rhythm",
+            "chaos": "controlled chaotic electronic ad, rapid accents, high energy, clean mix",
+        }
+        vocal_direction = "vocal-friendly with the provided lyrics" if (lyrics_text or "").strip() else "instrumental, no lead vocal"
+        tags = (
+            f"{style_tags.get(mood, style_tags['cinematic'])}, {vocal_direction}, "
+            f"{bpm} bpm, {keyscale}, {timesignature}/4 feel, professional TikTok product advertisement, "
+            "subtle film grain mood, polished commercial master, fresh variation"
+        )
+        return keyscale, timesignature, tags
+
+    @classmethod
+    def _finalize_music_direction(cls, config, bpm, lyrics_text):
+        fallback_key, fallback_time, fallback_tags = cls._fallback_music_direction(
+            config, bpm, lyrics_text
+        )
+        use_llm_music = bool(config.get("_music_direction_from_llm"))
+        keyscale = cls._normalize_keyscale(
+            config.get("recommended_keyscale") if use_llm_music else None,
+            fallback_key,
+        )
+        timesignature = cls._normalize_timesignature(
+            config.get("recommended_timesignature") if use_llm_music else None,
+            fallback_time,
+        )
+        tags = config.get("recommended_music_tags") if use_llm_music else ""
+        if isinstance(tags, list):
+            tags = ", ".join(str(tag).strip() for tag in tags if str(tag).strip())
+        tags = str(tags or "").strip()
+        if not tags or tags.startswith("premium cinematic TikTok product ad, polished commercial"):
+            tags = fallback_tags
+        config["recommended_keyscale"] = keyscale
+        config["recommended_timesignature"] = timesignature
+        config["recommended_music_tags"] = tags[:900]
+        return keyscale, timesignature, config["recommended_music_tags"]
+
+    @staticmethod
     def _commercial_chunk_score(chunk, source_scores, fps):
         vid_idx, start, end = chunk
         dur = max(0.0, (end - start) / max(1, fps))
@@ -1075,6 +1213,7 @@ class DJ_AutoEditor:
         distortion_mode = "skip_frames"
         enable_contrast_protect = True
         enable_phased = False
+        lyrics_text = str(kwargs.get("lyrics_text", "") or "")
 
         stale_model_values = {"", "ON", "OFF", "(ollama offline)", "(no models found)"}
         if not isinstance(llm_model, str) or llm_model in stale_model_values or llm_model.startswith("("):
@@ -1233,6 +1372,7 @@ class DJ_AutoEditor:
                 llm_model, llm_prompt, video_summary_lines, all_images,
                 vision_context=vision_context,
                 allow_keyframe_fallback=enable_vision,
+                lyrics_text=lyrics_text,
             )
         else:
             config = MOODS.get(mood, MOODS["bold"]).copy()
@@ -1609,6 +1749,9 @@ class DJ_AutoEditor:
         final_duration = final_frames / fps
         recommended_bpm = self._recommend_bpm(config, all_images, source_scores)
         config["recommended_bpm"] = recommended_bpm
+        recommended_keyscale, recommended_timesignature, recommended_music_tags = (
+            self._finalize_music_direction(config, recommended_bpm, lyrics_text)
+        )
 
         video_info_output = {
             "loaded_fps": fps,
@@ -1639,6 +1782,8 @@ class DJ_AutoEditor:
         print(f"[AutoEditor] ✅ DONE — FRAGMENT & SHUFFLE")
         print(f"[AutoEditor]   Output: {final_frames} frames ({final_duration:.2f}s) at {fps}fps")
         print(f"[AutoEditor]   Recommended song BPM: {recommended_bpm}")
+        print(f"[AutoEditor]   Recommended keyscale: {recommended_keyscale}")
+        print(f"[AutoEditor]   Recommended time signature: {recommended_timesignature}")
         print(f"[AutoEditor]   Resolution: {target_w}x{target_h}")
         print(f"[AutoEditor]   Mood: {mood}")
         print(f"[AutoEditor]   Chunks: {len(shuffled_chunks)} fragments from {n_videos} videos")
@@ -1662,7 +1807,8 @@ class DJ_AutoEditor:
 
         return (
             combined_frames, audio_output, video_info_output, edit_report,
-            raw_descriptions, int(final_frames), int(recommended_bpm)
+            raw_descriptions, int(final_frames), int(recommended_bpm),
+            recommended_keyscale, int(recommended_timesignature), recommended_music_tags
         )
 
     # ─── Report builder ──────────────────────────────────────────────────
@@ -1781,6 +1927,14 @@ class DJ_AutoEditor:
             }
             vfx_readable = [vfx_names.get(v, v) for v in vfx]
             r.append(f"  Effects: {', '.join(vfx_readable)}")
+        r.append("")
+
+        r.append("MUSIC DIRECTION")
+        r.append("-" * 40)
+        r.append(f"  BPM: {config.get('recommended_bpm', 'see INT output')}")
+        r.append(f"  Keyscale: {config.get('recommended_keyscale', 'C major')}")
+        r.append(f"  Time signature: {config.get('recommended_timesignature', 4)}")
+        r.append(f"  ACE-Step tags: {config.get('recommended_music_tags', '')}")
         r.append("")
 
         # Results (concise)
@@ -1924,11 +2078,19 @@ class DJ_AutoEditor:
                 "clean premium transitions, believable movement, and a desirable hero ending. "
                 "Bad AI/morphing motion is removed when detected instead of frozen."
             ),
+            "recommended_keyscale": "G minor",
+            "recommended_timesignature": 4,
+            "recommended_music_tags": (
+                "bold modern ad music, punchy drums, confident bass, sharp product hook, "
+                "instrumental, no lead vocal, professional TikTok product advertisement, "
+                "subtle film grain mood, polished commercial master"
+            ),
+            "_music_direction_from_llm": False,
         })
         return config
 
     def _get_llm_config(self, llm_model, llm_prompt, video_summary_lines, all_images,
-                        vision_context="", allow_keyframe_fallback=True):
+                        vision_context="", allow_keyframe_fallback=True, lyrics_text=""):
         """Ask the LLM for editing configuration.
         If vision_context is provided, uses text-only mode (Florence-2 descriptions).
         Otherwise falls back to sending keyframe images."""
@@ -1956,7 +2118,8 @@ class DJ_AutoEditor:
         if vision_context:
             print(f"[AutoEditor] 👁️ Using Vision Director mode (Florence-2 descriptions)")
             config = ask_ollama_with_descriptions(
-                llm_model, llm_prompt, video_info_str, vision_context
+                llm_model, llm_prompt, video_info_str, vision_context,
+                lyrics_text=lyrics_text,
             )
             if config is not None:
                 if "cut_pattern" not in config:
@@ -1969,7 +2132,9 @@ class DJ_AutoEditor:
 
         if not allow_keyframe_fallback:
             print("[AutoEditor] Video understanding OFF - using text-only LLM direction")
-            config = ask_ollama(llm_model, llm_prompt, video_info_str)
+            config = ask_ollama(
+                llm_model, llm_prompt, video_info_str, lyrics_text=lyrics_text
+            )
             if config is None:
                 print("[AutoEditor] Text-only LLM returned no valid config - using premium fallback director config")
                 return self._professional_fallback_config()
@@ -1999,6 +2164,7 @@ class DJ_AutoEditor:
             llm_model, llm_prompt, video_info_str,
             keyframe_images=keyframe_b64 if keyframe_b64 else None,
             keyframe_descriptions=keyframe_descriptions if keyframe_b64 else None,
+            lyrics_text=lyrics_text,
         )
 
         if config is None:

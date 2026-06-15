@@ -16,6 +16,12 @@ import urllib.error
 OLLAMA_BASE = "http://localhost:11434"
 AUTOEDITOR_LLM_TIMEOUT_SECONDS = 75
 LYRICS_LLM_TIMEOUT_SECONDS = 35
+ACE_KEY_SCALES = [
+    f"{root} {quality}"
+    for quality in ["major", "minor"]
+    for root in ["C", "C#", "Db", "D", "D#", "Eb", "E", "F", "F#", "Gb", "G", "G#", "Ab", "A", "A#", "Bb", "B"]
+]
+ACE_TIME_SIGNATURES = [2, 3, 4, 6]
 
 
 def list_ollama_models():
@@ -69,7 +75,80 @@ def frames_to_base64(frame_tensors, max_size=256):
     return images_b64
 
 
-def ask_ollama(model, user_prompt, video_summaries, keyframe_images=None, keyframe_descriptions=None):
+def _lyrics_context(lyrics_text, limit=1400):
+    lyrics_text = (lyrics_text or "").strip()
+    if not lyrics_text:
+        return "\nSONG LYRICS INPUT:\nNo lyrics provided. Recommend instrumental/ad-music tags unless the brief asks for vocals.\n"
+    preview = lyrics_text[:limit]
+    if len(lyrics_text) > limit:
+        preview += "\n... [lyrics truncated for planning]"
+    return f"\nSONG LYRICS INPUT:\n{preview}\n"
+
+
+def _normalize_keyscale(value, default="C major"):
+    if isinstance(value, str):
+        clean = value.replace("NI ", "").strip()
+        clean = " ".join(clean.split())
+        for keyscale in ACE_KEY_SCALES:
+            if clean.lower() == keyscale.lower():
+                return keyscale
+    return default
+
+
+def _normalize_timesignature(value, default=4):
+    if isinstance(value, str):
+        value = value.strip()
+        if value.endswith("/4") or value.endswith("/8"):
+            value = value.split("/", 1)[0]
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = default
+    return value if value in ACE_TIME_SIGNATURES else default
+
+
+def _sanitize_music_fields(config):
+    had_music_direction = any(
+        key in config
+        for key in (
+            "recommended_keyscale", "keyscale", "music_keyscale",
+            "recommended_timesignature", "timesignature", "time_signature",
+            "recommended_music_tags", "music_tags", "ace_tags",
+        )
+    )
+    keyscale = (
+        config.get("recommended_keyscale")
+        or config.get("keyscale")
+        or config.get("music_keyscale")
+        or "C major"
+    )
+    config["recommended_keyscale"] = _normalize_keyscale(keyscale)
+
+    timesig = (
+        config.get("recommended_timesignature")
+        or config.get("timesignature")
+        or config.get("time_signature")
+        or 4
+    )
+    config["recommended_timesignature"] = _normalize_timesignature(timesig)
+
+    tags = (
+        config.get("recommended_music_tags")
+        or config.get("music_tags")
+        or config.get("ace_tags")
+        or ""
+    )
+    if isinstance(tags, list):
+        tags = ", ".join(str(tag).strip() for tag in tags if str(tag).strip())
+    tags = str(tags).strip()
+    if not tags:
+        tags = "premium cinematic TikTok product ad, polished commercial instrumental, clean hook, subtle groove, modern mix"
+    config["recommended_music_tags"] = tags[:900]
+    config["_music_direction_from_llm"] = had_music_direction
+    return config
+
+
+def ask_ollama(model, user_prompt, video_summaries, keyframe_images=None, keyframe_descriptions=None, lyrics_text=""):
     """
     Send a prompt + optional keyframe images to Ollama for edit config.
 
@@ -126,11 +205,28 @@ def ask_ollama(model, user_prompt, video_summaries, keyframe_images=None, keyfra
             "  - Bright/energetic footage → flash_white or swipe transitions\n"
         )
 
+    music_direction = f"""
+ACE-STEP 1.5 MUSIC DIRECTION:
+You must also recommend music settings for ComfyUI node TextEncodeAceStepAudio1.5.
+- recommended_keyscale must be exactly one of: {json.dumps(ACE_KEY_SCALES)}
+- recommended_timesignature must be exactly one of: {json.dumps(ACE_TIME_SIGNATURES)}
+- recommended_music_tags must be a concise ACE-Step tags prompt for the generated song.
+- Choose major keys for bright, fresh, clean, friendly, playful, confident, hopeful, or broad-sales ads.
+- Choose minor keys for luxury, cinematic, sensual, mysterious, fashion, night, intense, tech, or dramatic ads.
+- Use timesignature 4 for most TikTok/product/pop ads.
+- Use timesignature 2 for punchy sport/action/mechanical urgency.
+- Use timesignature 3 for elegant romantic sway only when it truly helps.
+- Use timesignature 6 for cinematic/luxury/emotional flowing motion.
+- Music tags should describe genre, energy, instruments, mix, vocal/instrumental direction, and ad purpose. Make it new and different while still matching the product.
+"""
+
     system = f"""You are a world-class product commercial director, film editor, and advertising creative director. You create premium edits that sell the product while keeping it believable, clean, and cinematic.
 
 SOURCE VIDEOS:
 {video_summaries}
 {visual_context}
+{_lyrics_context(lyrics_text)}
+{music_direction}
 DIRECTOR BRIEF:
 1. This is ALWAYS a TikTok sales ad, but it must also feel luxury, cinematic, premium, and professional.
 2. First choose the best hidden mood from this list: {json.dumps(available_moods)}.
@@ -219,6 +315,9 @@ ALL PARAMETERS (include EVERY key in your JSON response):
 20. "micro_ramp_chance": float 0.0-0.25
 21. "contrast_protect": boolean true/false — enable soft contrast protection (recommend true)
 22. "edit_narrative": A 3-5 sentence PERSONAL explanation of your creative vision. Explain the chosen mood, how the user's prompt modified it, how much TikTok/luxury/cinematic/premium energy you applied, what weak AI-video motion should be avoided, the hook, the proof/detail section, and the hero ending. Write as a creative director explaining their vision to a client.
+23. "recommended_keyscale": one of {json.dumps(ACE_KEY_SCALES)}
+24. "recommended_timesignature": one of {json.dumps(ACE_TIME_SIGNATURES)}
+25. "recommended_music_tags": string for ACE-Step tags, specific to this product/video/lyrics
 
 RESPOND WITH ONLY A VALID JSON OBJECT. No markdown, no explanation outside the JSON."""
 
@@ -402,6 +501,7 @@ def _sanitize_config(config, valid_transitions, valid_grades, valid_speeds):
         else:
             config["fragment_phases"] = None
 
+    _sanitize_music_fields(config)
     return config
 
 
@@ -413,7 +513,7 @@ def _clamp_chance(config, key, lo, hi, default):
         config[key] = default
 
 
-def ask_ollama_with_descriptions(model, user_prompt, video_summaries, vision_context):
+def ask_ollama_with_descriptions(model, user_prompt, video_summaries, vision_context, lyrics_text=""):
     """
     Send a prompt + Florence-2 text descriptions to Ollama (text-only, no images).
 
@@ -454,12 +554,29 @@ def ask_ollama_with_descriptions(model, user_prompt, video_summaries, vision_con
         "editorial", "chaos",
     ]
 
+    music_direction = f"""
+ACE-STEP 1.5 MUSIC DIRECTION:
+You must also recommend music settings for ComfyUI node TextEncodeAceStepAudio1.5.
+- recommended_keyscale must be exactly one of: {json.dumps(ACE_KEY_SCALES)}
+- recommended_timesignature must be exactly one of: {json.dumps(ACE_TIME_SIGNATURES)}
+- recommended_music_tags must be a concise ACE-Step tags prompt for the generated song.
+- Choose major keys for bright, fresh, clean, friendly, playful, confident, hopeful, or broad-sales ads.
+- Choose minor keys for luxury, cinematic, sensual, mysterious, fashion, night, intense, tech, or dramatic ads.
+- Use timesignature 4 for most TikTok/product/pop ads.
+- Use timesignature 2 for punchy sport/action/mechanical urgency.
+- Use timesignature 3 for elegant romantic sway only when it truly helps.
+- Use timesignature 6 for cinematic/luxury/emotional flowing motion.
+- Music tags should describe genre, energy, instruments, mix, vocal/instrumental direction, and ad purpose. Make it new and different while still matching the product.
+"""
+
     system = f"""You are a world-class product commercial director, film editor, and advertising creative director. You create premium edits that sell the product while keeping it believable, clean, and cinematic.
 
 SOURCE VIDEOS:
 {video_summaries}
 
 {vision_context}
+{_lyrics_context(lyrics_text)}
+{music_direction}
 
 PROFESSIONAL EDITING RULES:
 OVERRIDING SALES-DIRECTOR RULES:
@@ -534,6 +651,9 @@ ALL PARAMETERS (include EVERY key in your JSON):
 20. "micro_ramp_chance": float 0.0-0.25
 21. "contrast_protect": boolean true/false (recommend true)
 22. "edit_narrative": 3-5 sentences explaining your creative vision. Reference SPECIFIC shots from the analysis. Explain the chosen mood, how the user's prompt modified it, the hook, the middle proof/detail section, and the hero ending.
+23. "recommended_keyscale": one of {json.dumps(ACE_KEY_SCALES)}
+24. "recommended_timesignature": one of {json.dumps(ACE_TIME_SIGNATURES)}
+25. "recommended_music_tags": string for ACE-Step tags, specific to this product/video/lyrics
 
 RESPOND WITH ONLY A VALID JSON OBJECT."""
 
