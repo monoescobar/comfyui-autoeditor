@@ -235,6 +235,7 @@ DIRECTOR BRIEF:
 5. Detect video-model problems: bad morphing, weird animation, ugly movement, distorted hands/product, fake-looking motion, or frames that feel like still images. Avoid or minimize those moments.
 6. The edit must make the product look desirable, real, premium, and easy to buy.
 7. Think like a commercial director: build hook -> product proof/detail -> emotional desire -> hero ending.
+8. The first 1 to 2 seconds must be a polished scroll-stopping hook with strong movement and excitement. Pick the aggressiveness from the product/mood: luxury gets elegant motion, energetic products get faster punch.
 
 PROFESSIONAL EDITING PRINCIPLES:
 1. Editing should feel intentional and mostly invisible. Avoid random effects that call attention to the edit instead of the product.
@@ -586,6 +587,7 @@ OVERRIDING SALES-DIRECTOR RULES:
 - Decide how much TikTok sales energy, luxury, cinematic drama, and premium polish to apply from 25% to 100% each, based on the footage.
 - Detect video-model problems: bad morphing, weird animation, ugly movement, distorted hands/product, fake-looking motion, or frames that feel like still images. Avoid or minimize those moments.
 - Keep the edit punchy and alive. Do not make a slow sequence of almost-still images.
+- The first 1 to 2 seconds must be a polished scroll-stopping hook with strong movement and excitement. Pick the aggressiveness from the product/mood.
 
 1. Use the VISUAL ANALYSIS above to choose the best mood from this list: {json.dumps(available_moods)}.
 2. Use that mood as the base edit language, then adapt it using the user's prompt.

@@ -27,8 +27,11 @@ from .ollama_bridge import (
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.15.1"
+AUTOEDITOR_NODE_VERSION = "v2026.06.17.1"
 MAX_FRAME_BATCH_ELEMENTS = 12_000_000
+PREMIUM_HOOK_MIN_SECONDS = 1.0
+PREMIUM_HOOK_TARGET_SECONDS = 1.7
+PREMIUM_HOOK_MAX_SECONDS = 2.35
 
 
 class DJ_AutoEditor:
@@ -784,7 +787,39 @@ class DJ_AutoEditor:
         return keyscale, timesignature, config["recommended_music_tags"]
 
     @staticmethod
-    def _commercial_chunk_score(chunk, source_scores, fps):
+    def _chunk_frames(chunk):
+        return max(0, int(chunk[2]) - int(chunk[1]))
+
+    @staticmethod
+    def _chunk_motion_score(chunk, all_images=None, sample_count=8):
+        """Small, memory-safe motion estimate for choosing product-ad hooks."""
+        if not all_images:
+            return 0.45
+        vid_idx, start, end = chunk
+        frames = all_images.get(vid_idx)
+        if frames is None:
+            return 0.45
+        start = max(0, int(start))
+        end = min(int(end), int(frames.shape[0]))
+        if end - start < 2:
+            return 0.20
+        try:
+            with torch.no_grad():
+                n = end - start
+                count = min(max(2, sample_count), n)
+                idx = torch.linspace(
+                    start, end - 1, count,
+                    device=frames.device,
+                    dtype=torch.float32,
+                ).round().long()
+                sample = frames.index_select(0, idx).float()
+                diff = (sample[1:] - sample[:-1]).abs().mean().item()
+            return max(0.0, min(1.0, diff * 14.0))
+        except Exception:
+            return 0.45
+
+    @staticmethod
+    def _commercial_chunk_score(chunk, source_scores, fps, all_images=None):
         vid_idx, start, end = chunk
         dur = max(0.0, (end - start) / max(1, fps))
         if dur < 0.35:
@@ -795,40 +830,222 @@ class DJ_AutoEditor:
             duration_score = 1.0
         else:
             duration_score = 0.75
-        return source_scores.get(vid_idx, 0.5) * 0.75 + duration_score * 0.25
+        motion_score = DJ_AutoEditor._chunk_motion_score(chunk, all_images)
+        return (
+            source_scores.get(vid_idx, 0.5) * 0.58
+            + duration_score * 0.22
+            + motion_score * 0.20
+        )
+
+    @staticmethod
+    def _hook_profile(selected_mood):
+        mood = str(selected_mood or "cinematic").lower()
+        energetic = {"bold", "urban", "energetic", "intense", "neon", "chaos", "playful"}
+        refined = {"luxury", "elegant", "romantic", "dreamy", "calm", "nature", "minimal", "editorial"}
+        if mood in energetic:
+            return {
+                "min_s": 1.0,
+                "target_s": 1.45,
+                "max_s": 2.05,
+                "cut_min_s": 0.28,
+                "cut_max_s": 0.55,
+                "min_cuts": 3,
+                "style": "high-energy polished hook",
+                "motion": "strong",
+            }
+        if mood in refined:
+            return {
+                "min_s": 1.25,
+                "target_s": 1.85,
+                "max_s": 2.45,
+                "cut_min_s": 0.42,
+                "cut_max_s": 0.82,
+                "min_cuts": 2,
+                "style": "premium cinematic hook",
+                "motion": "elegant",
+            }
+        return {
+            "min_s": PREMIUM_HOOK_MIN_SECONDS,
+            "target_s": PREMIUM_HOOK_TARGET_SECONDS,
+            "max_s": PREMIUM_HOOK_MAX_SECONDS,
+            "cut_min_s": 0.34,
+            "cut_max_s": 0.68,
+            "min_cuts": 2,
+            "style": "balanced sales hook",
+            "motion": "medium",
+        }
 
     @classmethod
-    def _shape_premium_commercial_arc(cls, chunks, source_scores, fps, max_output_frames):
+    def _hook_chunk_score(cls, chunk, source_scores, fps, all_images=None):
+        vid_idx, start, end = chunk
+        dur = cls._chunk_frames(chunk) / max(1, fps)
+        motion = cls._chunk_motion_score(chunk, all_images)
+        if dur <= 0.75:
+            length_score = 1.0
+        elif dur <= 1.4:
+            length_score = 0.82
+        elif dur <= 2.4:
+            length_score = 0.58
+        else:
+            length_score = 0.35
+        return (
+            source_scores.get(vid_idx, 0.5) * 0.42
+            + motion * 0.42
+            + length_score * 0.16
+        )
+
+    @classmethod
+    def _best_motion_window(cls, chunk, desired_frames, all_images=None):
+        vid_idx, start, end = chunk
+        n = cls._chunk_frames(chunk)
+        desired_frames = max(1, min(int(desired_frames), n))
+        if desired_frames >= n:
+            return chunk, []
+        start = int(start)
+        end = int(end)
+        max_start = end - desired_frames
+        candidate_starts = sorted(set([
+            start,
+            start + max(0, (max_start - start) // 3),
+            start + max(0, (max_start - start) // 2),
+            start + max(0, (max_start - start) * 2 // 3),
+            max_start,
+        ]))
+        best_start = max(
+            candidate_starts,
+            key=lambda pos: cls._chunk_motion_score(
+                (vid_idx, pos, pos + desired_frames), all_images
+            ),
+        )
+        hook_piece = (vid_idx, best_start, best_start + desired_frames)
+        remainders = []
+        if best_start > start:
+            remainders.append((vid_idx, start, best_start))
+        if best_start + desired_frames < end:
+            remainders.append((vid_idx, best_start + desired_frames, end))
+        return hook_piece, [c for c in remainders if cls._chunk_frames(c) > 0]
+
+    @classmethod
+    def _build_premium_sales_hook(cls, chunks, source_scores, fps, max_output_frames,
+                                  all_images=None, selected_mood="cinematic"):
+        """Build the first 1-ish to 2-ish seconds as a polished sales hook."""
+        profile = cls._hook_profile(selected_mood)
+        total_frames = sum(cls._chunk_frames(c) for c in chunks)
+        if total_frames <= 0:
+            return [], [], {
+                "hook_seconds": 0.0,
+                "hook_cut_count": 0,
+                "hook_style": profile["style"],
+                "hook_motion": profile["motion"],
+                "hook_videos": [],
+            }
+
+        frame_limit = max(1, min(int(max_output_frames or total_frames), total_frames))
+        min_frames = min(frame_limit, max(1, int(profile["min_s"] * fps)))
+        target_frames = min(frame_limit, max(min_frames, int(profile["target_s"] * fps)))
+        max_frames = min(frame_limit, max(target_frames, int(profile["max_s"] * fps)))
+        cut_min = max(4, int(profile["cut_min_s"] * fps))
+        cut_max = max(cut_min, int(profile["cut_max_s"] * fps))
+
+        scored = sorted(
+            chunks,
+            key=lambda c: cls._hook_chunk_score(c, source_scores, fps, all_images),
+            reverse=True,
+        )
+        selected = []
+        remainders = []
+        used_originals = set()
+        selected_frames = 0
+
+        def choose_next_candidate():
+            for candidate in scored:
+                key = tuple(candidate)
+                if key in used_originals:
+                    continue
+                if selected and candidate[0] == selected[-1][0]:
+                    different = [
+                        c for c in scored
+                        if tuple(c) not in used_originals and c[0] != selected[-1][0]
+                    ]
+                    if different:
+                        return different[0]
+                return candidate
+            return None
+
+        while selected_frames < target_frames or len(selected) < profile["min_cuts"]:
+            if selected_frames >= max_frames:
+                break
+            candidate = choose_next_candidate()
+            if candidate is None:
+                break
+            used_originals.add(tuple(candidate))
+            remaining_target = max(cut_min, target_frames - selected_frames)
+            desired = min(cls._chunk_frames(candidate), cut_max, remaining_target)
+            if selected_frames + desired > max_frames:
+                desired = max(1, max_frames - selected_frames)
+            if desired <= 0:
+                break
+            hook_piece, tail = cls._best_motion_window(candidate, desired, all_images)
+            selected.append(hook_piece)
+            remainders.extend(tail)
+            selected_frames += cls._chunk_frames(hook_piece)
+
+        if not selected and scored:
+            candidate = scored[0]
+            used_originals.add(tuple(candidate))
+            desired = min(cls._chunk_frames(candidate), target_frames)
+            hook_piece, tail = cls._best_motion_window(candidate, desired, all_images)
+            selected = [hook_piece]
+            remainders.extend(tail)
+            selected_frames = cls._chunk_frames(hook_piece)
+
+        remaining_chunks = [
+            c for c in chunks
+            if tuple(c) not in used_originals
+        ]
+        remaining_chunks.extend(remainders)
+
+        plan = {
+            "hook_seconds": selected_frames / max(1, fps),
+            "hook_cut_count": len(selected),
+            "hook_style": profile["style"],
+            "hook_motion": profile["motion"],
+            "hook_videos": sorted(set(c[0] for c in selected)),
+        }
+        return selected, remaining_chunks, plan
+
+    @classmethod
+    def _shape_premium_commercial_arc(cls, chunks, source_scores, fps, max_output_frames,
+                                      all_images=None, selected_mood="cinematic"):
         """Create hook -> variation -> product hero ending while respecting memory limits."""
         if not chunks:
             return [], {"trimmed": False, "reason": "no chunks"}
 
         total_frames = sum(end - start for _, start, end in chunks)
+        hook_chunks, available_chunks, hook_plan = cls._build_premium_sales_hook(
+            chunks, source_scores, fps, max_output_frames,
+            all_images=all_images,
+            selected_mood=selected_mood,
+        )
         scored = sorted(
-            chunks,
-            key=lambda c: cls._commercial_chunk_score(c, source_scores, fps),
+            available_chunks or chunks,
+            key=lambda c: cls._commercial_chunk_score(c, source_scores, fps, all_images),
             reverse=True,
         )
 
         def chunk_frames(chunk):
             return max(0, chunk[2] - chunk[1])
 
-        short_candidates = [
-            c for c in scored
-            if chunk_frames(c) <= int(max(1, fps) * 1.6)
-        ]
-        hook = short_candidates[0] if short_candidates else scored[0]
-        hero = scored[0]
+        hook = hook_chunks[0] if hook_chunks else (scored[0] if scored else chunks[0])
+        hero = scored[0] if scored else hook
         if total_frames <= max_output_frames:
-            ordered = list(chunks)
-            if ordered and tuple(hook) in [tuple(c) for c in ordered]:
-                ordered.remove(hook)
-                ordered.insert(0, hook)
-            if ordered and tuple(hero) in [tuple(c) for c in ordered] and tuple(hero) != tuple(hook):
-                ordered.remove(hero)
-                ordered.append(hero)
-            ordered = cls._fix_consecutive(ordered)
-            return ordered, {
+            rest = list(available_chunks)
+            if rest and tuple(hero) in [tuple(c) for c in rest]:
+                rest.remove(hero)
+                rest.append(hero)
+            rest = cls._fix_consecutive(rest)
+            ordered = list(hook_chunks) + rest
+            plan = {
                 "trimmed": False,
                 "source_frames": total_frames,
                 "selected_frames": total_frames,
@@ -836,9 +1053,11 @@ class DJ_AutoEditor:
                 "hook_video": hook[0],
                 "hero_video": hero[0],
             }
+            plan.update(hook_plan)
+            return ordered, plan
 
-        selected = []
-        selected_keys = set()
+        selected = list(hook_chunks)
+        selected_keys = {tuple(c) for c in selected}
 
         def add_chunk(chunk, frame_budget):
             key = tuple(chunk)
@@ -861,17 +1080,16 @@ class DJ_AutoEditor:
             return frame_budget - n
 
         ending_frames = chunk_frames(hero) if tuple(hero) != tuple(hook) else 0
-        budget = max_output_frames
+        hook_frames = sum(chunk_frames(c) for c in hook_chunks)
+        budget = max(0, max_output_frames - hook_frames)
         if ending_frames and ending_frames < budget:
             budget -= ending_frames
 
-        budget = add_chunk(hook, budget)
-
-        remaining = [c for c in chunks if tuple(c) not in selected_keys and tuple(c) != tuple(hero)]
+        remaining = [c for c in available_chunks if tuple(c) not in selected_keys and tuple(c) != tuple(hero)]
         weighted_remaining = sorted(
             remaining,
             key=lambda c: (
-                cls._commercial_chunk_score(c, source_scores, fps)
+                cls._commercial_chunk_score(c, source_scores, fps, all_images)
                 + random.random() * 0.18
             ),
             reverse=True,
@@ -892,16 +1110,16 @@ class DJ_AutoEditor:
             elif selected:
                 weakest_i = min(
                     range(len(selected)),
-                    key=lambda i: cls._commercial_chunk_score(selected[i], source_scores, fps),
+                    key=lambda i: cls._commercial_chunk_score(selected[i], source_scores, fps, all_images),
                 )
-                if chunk_frames(hero) <= chunk_frames(selected[weakest_i]):
+                if weakest_i >= len(hook_chunks) and chunk_frames(hero) <= chunk_frames(selected[weakest_i]):
                     selected_keys.discard(tuple(selected[weakest_i]))
                     selected[weakest_i] = hero
                     selected_keys.add(tuple(hero))
 
-        selected = cls._fix_consecutive(selected)
+        selected = list(hook_chunks) + cls._fix_consecutive(selected[len(hook_chunks):])
         selected_frames = sum(chunk_frames(c) for c in selected)
-        return selected, {
+        plan = {
             "trimmed": selected_frames < total_frames,
             "source_frames": total_frames,
             "selected_frames": selected_frames,
@@ -909,6 +1127,8 @@ class DJ_AutoEditor:
             "hook_video": hook[0],
             "hero_video": hero[0],
         }
+        plan.update(hook_plan)
+        return selected, plan
 
     # ─── Fragmentation: chop a video into random-length chunks ───────────
 
@@ -1537,7 +1757,9 @@ class DJ_AutoEditor:
         # Global shuffle across all videos
         shuffled_chunks = self._smart_shuffle(all_chunks, shuffle_intensity)
         shuffled_chunks, arc_plan = self._shape_premium_commercial_arc(
-            shuffled_chunks, source_scores, fps, memory_plan["max_output_frames"]
+            shuffled_chunks, source_scores, fps, memory_plan["max_output_frames"],
+            all_images=all_images,
+            selected_mood=config.get("selected_mood", "cinematic"),
         )
         if arc_plan.get("trimmed"):
             print(
@@ -1552,6 +1774,11 @@ class DJ_AutoEditor:
         print(
             f"[AutoEditor] Commercial arc: hook from video {arc_plan.get('hook_video', '?')}, "
             f"hero ending from video {arc_plan.get('hero_video', '?')}"
+        )
+        print(
+            f"[AutoEditor] Opening hook: {arc_plan.get('hook_cut_count', 0)} cuts, "
+            f"{arc_plan.get('hook_seconds', 0):.2f}s, "
+            f"{arc_plan.get('hook_style', 'sales hook')}"
         )
 
         # ══════════════════════════════════════════════════════════════════
@@ -1577,6 +1804,8 @@ class DJ_AutoEditor:
         black_breath_chance = config.get("black_breath_chance", 0.1) if enable_black_breath else 0.0
         hold_chance = config.get("hold_frame_chance", 0.1) if enable_hold else 0.0
         micro_ramp_chance = config.get("micro_ramp_chance", 0.15) if enable_micro_ramp else 0.0
+        hook_cut_count = int(arc_plan.get("hook_cut_count", 0) or 0)
+        hook_motion = str(arc_plan.get("hook_motion", "medium"))
 
         frame_segments = []
         audio_segments = []
@@ -1588,6 +1817,21 @@ class DJ_AutoEditor:
 
             # Extract frames. Keep this as a view until an effect really needs a copy.
             frames = all_images[vid_idx][start:end]
+            is_hook_cut = cut_idx < hook_cut_count
+            hook_punched = False
+            if is_hook_cut:
+                if hook_motion == "strong":
+                    hook_scale = random.uniform(1.06, 1.12)
+                elif hook_motion == "elegant":
+                    hook_scale = random.uniform(1.035, 1.075)
+                else:
+                    hook_scale = random.uniform(1.045, 1.095)
+                frames = self._apply_punch_in(frames, scale=hook_scale)
+                hook_punched = True
+                if hook_motion == "strong" and frames.shape[0] >= 8:
+                    frames = self._micro_speed_ramp(frames)
+                elif hook_motion == "medium" and cut_idx == 0 and frames.shape[0] >= 10:
+                    frames = self._micro_speed_ramp(frames)
 
             # ── Per-chunk effects ─────────────────────────────────────────
 
@@ -1596,7 +1840,7 @@ class DJ_AutoEditor:
                 frames = frames.flip(0)
 
             # Scale punch-in
-            if punch_in_chance > 0 and random.random() < punch_in_chance:
+            if not hook_punched and punch_in_chance > 0 and random.random() < punch_in_chance:
                 frames = self._apply_punch_in(frames)
 
             # Micro speed ramp (slow→fast within clip)
@@ -1856,6 +2100,11 @@ class DJ_AutoEditor:
         r.append("🎯 COMMERCIAL ARC")
         r.append("─" * 40)
         r.append(f"  Hook source: video {arc_plan.get('hook_video', '?')}")
+        r.append(
+            f"  Opening hook: {arc_plan.get('hook_cut_count', 0)} cuts, "
+            f"{arc_plan.get('hook_seconds', 0):.2f}s, "
+            f"{arc_plan.get('hook_style', 'sales hook')}"
+        )
         r.append(f"  Hero ending source: video {arc_plan.get('hero_video', '?')}")
         r.append(f"  Guard mode: {memory_plan.get('guard_mode', 'unknown')}")
         r.append(
