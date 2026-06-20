@@ -575,6 +575,7 @@ def _alignment_reliability(aligned_lines, total_lyrics_words, transcript_word_co
         return False, f"{longest_gap} consecutive words lacked anchors"
 
     last_start = -1.0
+    repairable_timestamps = 0
     duration = max(0.1, float(audio_duration or 0.0))
     for line in aligned_lines:
         for word in line.get("words", []):
@@ -585,11 +586,18 @@ def _alignment_reliability(aligned_lines, total_lyrics_words, transcript_word_co
                 return False, "invalid word timestamp"
             if not math.isfinite(start) or not math.isfinite(end):
                 return False, "non-finite word timestamp"
-            if start < last_start - 0.05 or end <= start or start > duration + 0.25:
-                return False, "non-monotonic or out-of-range timestamps"
-            last_start = start
+            if start < -0.25 or start > duration + 0.25 or end < -0.25 or end > duration + 0.50:
+                return False, "out-of-range timestamps"
+            if start < last_start - 0.15 or end < start - 0.15:
+                return False, "severely non-monotonic timestamps"
+            if start < last_start or end <= start or start < 0.0 or end > duration:
+                repairable_timestamps += 1
+            last_start = max(last_start, start)
 
-    return True, f"{matched}/{total_lyrics_words} anchored words"
+    quality = f"{matched}/{total_lyrics_words} anchored words"
+    if repairable_timestamps:
+        quality += f"; normalized {repairable_timestamps} minor timestamp issues"
+    return True, quality
 
 
 def _sanitize_aligned_timings(aligned_lines, audio_duration):
