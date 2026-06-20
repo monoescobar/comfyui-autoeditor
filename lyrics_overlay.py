@@ -14,7 +14,7 @@ from .text_renderer import TextRenderer, DISPLAY_STYLES, LINE_MODES, POSITIONS
 from .ollama_bridge import list_ollama_models
 
 
-LYRICS_OVERLAY_NODE_VERSION = "v2026.06.13.3"
+LYRICS_OVERLAY_NODE_VERSION = "v2026.06.20.1"
 LYRICS_FONT_SCALE = 0.85
 
 
@@ -222,6 +222,12 @@ class DJ_LyricsOverlay:
             print("[LyricsOverlay] ❌ Alignment failed — passing through unchanged")
             return (video_frames, song_audio, video_info, "Alignment failed.")
 
+        timing_estimated = any(
+            line.get("fallback_timing")
+            or any(word.get("estimated") for word in line.get("words", []))
+            for line in aligned
+        )
+
         # ── Step 2: LLM auto-styling (if enabled) ───────────────────
         config = self._build_config(kwargs, display_style)
 
@@ -231,16 +237,10 @@ class DJ_LyricsOverlay:
                 from .ollama_bridge import ask_ollama_lyrics_style
                 llm_config = ask_ollama_lyrics_style(llm_model, lyrics_text, bpm)
                 if llm_config:
-                    # LLM only controls: display_style, font_family, font_size
-                    # User keeps control of: colors, position, alignment, outline, background
-                    user_keeps = {k: config[k] for k in [
-                        "text_color", "highlight_color", "text_position",
-                        "text_alignment", "outline_thickness", "outline_color",
-                        "background_style", "background_opacity", "text_shadow",
-                        "line_display",
-                    ] if k in config}
-                    config.update(llm_config)
-                    config.update(user_keeps)
+                    # Keep the AI stylist deterministic and limited to safe visual choices.
+                    for key in ("display_style", "font_family", "font_size"):
+                        if key in llm_config:
+                            config[key] = llm_config[key]
                     print(f"[LyricsOverlay] AI picked style: {config.get('display_style', display_style)}")
             except Exception as e:
                 print(f"[LyricsOverlay] ⚠️ AI Stylist failed ({e}), using manual settings")
@@ -248,6 +248,9 @@ class DJ_LyricsOverlay:
             print(f"\n[LyricsOverlay] Step 2/3: Using manual style settings")
 
         # ── Step 3: Render text on frames ────────────────────────────
+        if timing_estimated and config.get("display_style") not in {"subtitles", "fade_flow"}:
+            print("[LyricsOverlay] Sync safety: using subtitles because word timing confidence is low")
+            config["display_style"] = "subtitles"
         config = self._normalize_config(config)
 
         print(f"\n[LyricsOverlay] Step 3/3: Rendering '{config['display_style']}' on {n_frames} frames...")
@@ -288,10 +291,23 @@ class DJ_LyricsOverlay:
 
     def _normalize_config(self, config):
         config = dict(config)
-        raw_size = int(config.get("font_size", 42))
-        config["font_size"] = max(16, int(round(raw_size * LYRICS_FONT_SCALE)))
-        if config.get("text_position") == "bottom":
+        if config.get("display_style") not in DISPLAY_STYLES:
+            config["display_style"] = "subtitles"
+        if config.get("line_display") not in LINE_MODES:
+            config["line_display"] = "single_line"
+        if config.get("text_position") not in POSITIONS or config.get("text_position") == "bottom":
             config["text_position"] = "lower_third"
+        if config.get("text_alignment") not in {"left", "center", "right"}:
+            config["text_alignment"] = "center"
+        try:
+            raw_size = int(float(config.get("font_size", 42)))
+        except (TypeError, ValueError):
+            raw_size = 42
+        config["font_size"] = max(16, min(120, int(round(raw_size * LYRICS_FONT_SCALE))))
+        try:
+            config["background_opacity"] = max(0.0, min(1.0, float(config.get("background_opacity", 0.6))))
+        except (TypeError, ValueError):
+            config["background_opacity"] = 0.6
         return config
 
     def _build_report(self, aligned, bpm, config, n_frames, fps):
@@ -307,7 +323,14 @@ class DJ_LyricsOverlay:
         matched = sum(1 for ln in aligned for w in ln['words'] if not w.get('interpolated'))
         r.append(f"  Words: {total_words} ({matched} matched, {total_words-matched} interpolated)")
         estimated = any(ln.get("fallback_timing") or any(w.get("estimated") for w in ln["words"]) for ln in aligned)
-        r.append(f"  Timing source: {'estimated fallback' if estimated else 'Whisper word timing'}")
+        if estimated:
+            timing_source = next(
+                (ln.get("timing_source") for ln in aligned if ln.get("timing_source")),
+                "estimated fallback",
+            )
+        else:
+            timing_source = "Whisper word timing"
+        r.append(f"  Timing source: {timing_source}")
         r.append(f"  BPM: {bpm}")
         r.append("")
         r.append(f"🎨 STYLE")

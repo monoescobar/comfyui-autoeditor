@@ -52,9 +52,26 @@ def _normalize_word(text):
     return re.sub(r"[^\w']", "", text, flags=re.UNICODE)
 
 
+_LYRIC_METADATA_RE = re.compile(
+    r"^[\[<{]\s*(?:intro|verse|pre[- ]?chorus|chorus|post[- ]?chorus|hook|bridge|outro|"
+    r"instrumental|music|break|interlude|drop|refrain|repeat|end|fade|solo|spoken|"
+    r"whispered|female vocal|male vocal)(?:[\s\d:_-].*)?[\]}>]$",
+    re.IGNORECASE,
+)
+
+
+def _is_lyrics_metadata_line(line):
+    """Return True for song-structure labels that should never appear on screen."""
+    return bool(_LYRIC_METADATA_RE.fullmatch(str(line).strip()))
+
+
 def _lyrics_initial_prompt(lyrics_text, max_chars=1000):
     """Give Whisper a short lyric hint so song transcription follows the supplied words."""
-    cleaned = " ".join(line.strip() for line in lyrics_text.splitlines() if line.strip())
+    cleaned = " ".join(
+        line.strip()
+        for line in lyrics_text.splitlines()
+        if line.strip() and not _is_lyrics_metadata_line(line)
+    )
     return cleaned[:max_chars] if cleaned else None
 
 
@@ -89,7 +106,14 @@ def _apply_timing_offset(aligned_lines, timing_offset_ms):
     print(f"[LyricsSync] Applied offset: {timing_offset_ms:+d}ms")
 
 
-def fallback_align_lyrics(lyrics_text, duration, timing_offset_ms=0):
+def fallback_align_lyrics(
+    lyrics_text,
+    duration,
+    timing_offset_ms=0,
+    active_start=None,
+    active_end=None,
+    fallback_reason="estimated",
+):
     """
     Estimate clean lyric timings when Whisper is unavailable.
 
@@ -100,11 +124,20 @@ def fallback_align_lyrics(lyrics_text, duration, timing_offset_ms=0):
     if not lines:
         return []
 
-    duration = max(float(duration or 0.0), len(lines) * 0.55)
+    duration = float(duration or 0.0)
+    duration = max(0.1, duration) if duration > 0 else max(0.1, len(lines) * 0.55)
     start_pad = min(0.45, duration * 0.06)
     end_pad = min(0.45, duration * 0.06)
-    usable_start = start_pad
-    usable_end = max(usable_start + 0.1, duration - end_pad)
+    if active_start is None or active_end is None:
+        usable_start = start_pad
+        usable_end = max(usable_start + 0.1, duration - end_pad)
+    else:
+        usable_start = max(0.0, min(float(active_start), duration - 0.1))
+        usable_end = max(usable_start + 0.1, min(float(active_end), duration))
+        minimum_window = min(duration, max(0.8, len(lines) * 0.35))
+        if usable_end - usable_start < minimum_window:
+            usable_start = start_pad
+            usable_end = max(usable_start + 0.1, duration - end_pad)
     usable_duration = max(0.1, usable_end - usable_start)
     line_gap = min(0.12, usable_duration * 0.015)
     gap_total = line_gap * max(0, len(lines) - 1)
@@ -140,12 +173,13 @@ def fallback_align_lyrics(lyrics_text, duration, timing_offset_ms=0):
             "line_end": line_words[-1]["end"] if line_words else line_end,
             "words": line_words,
             "fallback_timing": True,
-            "timing_source": "estimated",
+            "timing_source": fallback_reason,
         })
         cursor = line_end + line_gap
 
     _apply_timing_offset(aligned, timing_offset_ms)
-    print(f"[LyricsSync] Estimated timing fallback: {len(aligned)} lines over {duration:.1f}s")
+    _sanitize_aligned_timings(aligned, duration)
+    print(f"[LyricsSync] Stable timing fallback ({fallback_reason}): {len(aligned)} lines over {usable_start:.1f}-{usable_end:.1f}s")
     return aligned
 
 
@@ -259,7 +293,7 @@ def _parse_lyrics(lyrics_text):
     lines = []
     for raw_line in lyrics_text.strip().split("\n"):
         stripped = raw_line.strip()
-        if not stripped:
+        if not stripped or _is_lyrics_metadata_line(stripped):
             continue
         # Extract words (keep original case for display, lowercase for matching)
         display_words = stripped.split()
@@ -507,6 +541,87 @@ def _interpolate_timestamps(timestamps, duration):
 
 # ── BPM detection ────────────────────────────────────────────────────────────
 
+def _longest_interpolated_run(aligned_lines):
+    longest = 0
+    current = 0
+    for line in aligned_lines:
+        for word in line.get("words", []):
+            if word.get("interpolated"):
+                current += 1
+                longest = max(longest, current)
+            else:
+                current = 0
+    return longest
+
+
+def _alignment_reliability(aligned_lines, total_lyrics_words, transcript_word_count, audio_duration):
+    if total_lyrics_words <= 0 or not aligned_lines:
+        return False, "no lyric words"
+
+    matched = sum(
+        1 for line in aligned_lines for word in line.get("words", [])
+        if not word.get("interpolated")
+    )
+    minimum_matches = min(total_lyrics_words, max(2, math.ceil(total_lyrics_words * 0.32)))
+    if matched < minimum_matches:
+        return False, f"only {matched}/{total_lyrics_words} reliable word anchors"
+
+    transcript_ratio = transcript_word_count / max(total_lyrics_words, 1)
+    if transcript_ratio < 0.25 or transcript_ratio > 4.0:
+        return False, f"transcript/lyrics word ratio {transcript_ratio:.2f} is unreliable"
+
+    longest_gap = _longest_interpolated_run(aligned_lines)
+    if longest_gap > max(8, math.ceil(total_lyrics_words * 0.45)):
+        return False, f"{longest_gap} consecutive words lacked anchors"
+
+    last_start = -1.0
+    duration = max(0.1, float(audio_duration or 0.0))
+    for line in aligned_lines:
+        for word in line.get("words", []):
+            try:
+                start = float(word["start"])
+                end = float(word["end"])
+            except (KeyError, TypeError, ValueError):
+                return False, "invalid word timestamp"
+            if not math.isfinite(start) or not math.isfinite(end):
+                return False, "non-finite word timestamp"
+            if start < last_start - 0.05 or end <= start or start > duration + 0.25:
+                return False, "non-monotonic or out-of-range timestamps"
+            last_start = start
+
+    return True, f"{matched}/{total_lyrics_words} anchored words"
+
+
+def _sanitize_aligned_timings(aligned_lines, audio_duration):
+    """Make every word and line strictly monotonic before binary-search rendering."""
+    duration = max(0.1, float(audio_duration or 0.0))
+    all_words = [word for line in aligned_lines for word in line.get("words", [])]
+    if not all_words:
+        return aligned_lines
+
+    minimum_word_duration = min(0.01, duration / len(all_words))
+    cursor = 0.0
+    word_index = 0
+    for line in aligned_lines:
+        words = line.get("words", [])
+        for word in words:
+            remaining = len(all_words) - word_index
+            latest_start = max(0.0, duration - minimum_word_duration * remaining)
+            latest_end = duration - minimum_word_duration * (remaining - 1)
+            start = max(cursor, min(latest_start, float(word.get("start", cursor))))
+            end = max(
+                start + minimum_word_duration,
+                min(latest_end, float(word.get("end", start + minimum_word_duration))),
+            )
+            word["start"] = start
+            word["end"] = end
+            cursor = end
+            word_index += 1
+        if words:
+            line["line_start"] = words[0]["start"]
+            line["line_end"] = max(words[0]["start"] + minimum_word_duration, words[-1]["end"])
+    return aligned_lines
+
 def align_lyrics(audio_dict, lyrics_text, model_size="base", timing_offset_ms=0):
     """Align lyrics with Whisper, falling back to estimated timing when needed."""
     global _whisper_model, _whisper_model_name
@@ -553,10 +668,27 @@ def align_lyrics(audio_dict, lyrics_text, model_size="base", timing_offset_ms=0)
         return []
 
     aligned_lines = _align_to_whisper(lines, whisper_words, duration)
+    reliable, quality_reason = _alignment_reliability(
+        aligned_lines, total_lyrics_words, len(whisper_words), duration
+    )
+    if not reliable:
+        vocal_start = max(0.0, float(whisper_words[0]["start"]) - 0.15)
+        vocal_end = min(duration, float(whisper_words[-1]["end"]) + 0.20)
+        print(f"[LyricsSync] Low-confidence alignment ({quality_reason}); using stable vocal-window timing")
+        return fallback_align_lyrics(
+            lyrics_text,
+            duration,
+            timing_offset_ms,
+            active_start=vocal_start,
+            active_end=vocal_end,
+            fallback_reason=f"vocal-window fallback: {quality_reason}",
+        )
+
     _apply_timing_offset(aligned_lines, timing_offset_ms)
+    aligned_lines = _sanitize_aligned_timings(aligned_lines, duration)
 
     matched = sum(1 for line in aligned_lines for word in line["words"] if not word.get("interpolated"))
-    print(f"[LyricsSync] Aligned {matched}/{total_lyrics_words} words directly, rest interpolated")
+    print(f"[LyricsSync] Reliable alignment: {quality_reason}; {total_lyrics_words-matched} words interpolated")
     return aligned_lines
 
 

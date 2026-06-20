@@ -771,7 +771,7 @@ RESPOND WITH ONLY JSON containing:
             "prompt": f"Choose the best lyrics overlay style for this song (BPM: {bpm}). Analyze the mood and energy.",
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.7, "num_predict": 500},
+            "options": {"temperature": 0.0, "num_predict": 500},
         }).encode("utf-8")
 
         req = urllib.request.Request(
@@ -788,7 +788,7 @@ RESPOND WITH ONLY JSON containing:
 
             # Validate
             if config.get("display_style") not in available_styles:
-                config["display_style"] = "word_pop"
+                config["display_style"] = "subtitles"
             if config.get("font_family") not in available_fonts:
                 config["font_family"] = "arial"
             if config.get("text_position") not in available_positions:
