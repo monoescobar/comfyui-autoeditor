@@ -27,7 +27,7 @@ from .ollama_bridge import (
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.17.1"
+AUTOEDITOR_NODE_VERSION = "v2026.06.20.1"
 MAX_FRAME_BATCH_ELEMENTS = 12_000_000
 PREMIUM_HOOK_MIN_SECONDS = 1.0
 PREMIUM_HOOK_TARGET_SECONDS = 1.7
@@ -59,6 +59,13 @@ class DJ_AutoEditor:
                 "video_info2": ("VHS_VIDEOINFO",),
             },
             "optional": {
+                "target_duration_seconds": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 600.0,
+                    "step": 1.0,
+                    "tooltip": "Exact final video length in seconds. 0 keeps automatic duration. Final frames are seconds multiplied by the FPS from video 1.",
+                }),
                 "video_understanding": (["ON", "FAST", "OFF"], {
                     "default": "FAST",
                     "tooltip": "Controls Florence-2 video understanding. ON=best quality/slow, FAST=fewer keyframes, OFF=skip vision analysis.",
@@ -347,6 +354,76 @@ class DJ_AutoEditor:
             result[start:end].copy_(blended)
         return result
 
+    @classmethod
+    def _fit_exact_timeline(cls, frames, target_frames, fps, hook_frames=0):
+        """Fit an exact duration while protecting the sales hook and hero ending."""
+        target_frames = max(1, int(target_frames))
+        current_frames = int(frames.shape[0])
+        if current_frames == target_frames:
+            return frames, "already exact"
+        if current_frames <= 1:
+            return cls._match_frame_count(frames, target_frames), "extended single available frame"
+
+        hook_keep = max(0, min(int(hook_frames), current_frames, target_frames - 1))
+        if target_frames < current_frames:
+            if target_frames <= hook_keep + 2 or current_frames - hook_keep < 3:
+                return cls._match_frame_count(frames, target_frames), "trimmed timeline uniformly"
+
+            available_after_hook = current_frames - hook_keep
+            hero_keep = min(
+                available_after_hook,
+                max(2, int(float(fps) * 1.2)),
+                max(2, int(target_frames * 0.28)),
+            )
+            hero_keep = min(hero_keep, max(1, target_frames - hook_keep - 1))
+            middle_target = max(0, target_frames - hook_keep - hero_keep)
+            middle_source = frames[hook_keep:current_frames - hero_keep]
+            parts = []
+            if hook_keep > 0:
+                parts.append(frames[:hook_keep])
+            if middle_target > 0 and middle_source.shape[0] > 0:
+                parts.append(cls._match_frame_count(middle_source, middle_target))
+            if hero_keep > 0:
+                parts.append(frames[-hero_keep:])
+            fitted = torch.cat(parts, dim=0)
+            if fitted.shape[0] != target_frames:
+                fitted = cls._match_frame_count(fitted, target_frames)
+            return fitted, "trimmed weaker middle while protecting hook and hero ending"
+
+        if hook_keep > 0:
+            hook = frames[:hook_keep]
+            body = frames[hook_keep:]
+        else:
+            hook = None
+            body = frames
+        body_target = target_frames - hook_keep
+        body_frames = int(body.shape[0])
+        if body_frames <= 1:
+            body_fitted = cls._match_frame_count(body, body_target)
+            method = "extended the available clean ending"
+        elif body_target / body_frames <= 1.35:
+            body_fitted = cls._match_frame_count(body, body_target)
+            method = "used subtle slow motion after the opening hook"
+        else:
+            hero_source_frames = min(body_frames, max(2, int(float(fps) * 1.5)))
+            nonhero = body[:-hero_source_frames]
+            hero = body[-hero_source_frames:]
+            nonhero_target = min(
+                max(0, body_target - hero_source_frames),
+                max(int(nonhero.shape[0]), int(nonhero.shape[0] * 1.25)),
+            )
+            parts = []
+            if nonhero_target > 0 and nonhero.shape[0] > 0:
+                parts.append(cls._match_frame_count(nonhero, nonhero_target))
+            hero_target = body_target - sum(int(part.shape[0]) for part in parts)
+            parts.append(cls._match_frame_count(hero, hero_target))
+            body_fitted = torch.cat(parts, dim=0)
+            method = "used subtle slow motion and extended the clean hero ending"
+
+        fitted = torch.cat([hook, body_fitted], dim=0) if hook is not None else body_fitted
+        if fitted.shape[0] != target_frames:
+            fitted = cls._match_frame_count(fitted, target_frames)
+        return fitted, method
     @staticmethod
     def _match_audio_samples(audio, target_samples):
         """Temporally resample audio to the exact requested sample count."""
@@ -495,6 +572,42 @@ class DJ_AutoEditor:
             "bytes_per_frame": bytes_per_frame,
         }
 
+    @staticmethod
+    def _apply_requested_duration(memory_plan, target_duration_seconds, fps):
+        """Turn a requested duration into an exact output-frame budget."""
+        plan = dict(memory_plan)
+        fps = max(1.0, float(fps))
+        try:
+            requested_seconds = float(target_duration_seconds)
+        except (TypeError, ValueError):
+            requested_seconds = 0.0
+        if not math.isfinite(requested_seconds) or requested_seconds <= 0:
+            plan["duration_mode"] = "automatic"
+            plan["target_output_frames"] = None
+            plan["requested_output_seconds"] = 0.0
+            return plan
+
+        target_frames = max(1, int(round(requested_seconds * fps)))
+        source_frames = int(plan.get("source_frames", target_frames))
+        if target_frames < source_frames:
+            guard_mode = "exact_target_trim_weakest"
+        elif target_frames > source_frames:
+            guard_mode = "exact_target_extend_clean_motion"
+        else:
+            guard_mode = "exact_target_already_matched"
+
+        plan.update({
+            "duration_mode": "exact",
+            "target_output_frames": target_frames,
+            "requested_output_seconds": requested_seconds,
+            "min_output_frames": target_frames,
+            "max_output_frames": target_frames,
+            "min_output_seconds": target_frames / fps,
+            "max_output_seconds": target_frames / fps,
+            "guard_mode": guard_mode,
+            "target_exceeds_memory_cap": target_frames > int(plan.get("memory_frame_cap", target_frames)),
+        })
+        return plan
     @staticmethod
     def _safe_float(value, default=None):
         try:
@@ -1082,7 +1195,8 @@ class DJ_AutoEditor:
         ending_frames = chunk_frames(hero) if tuple(hero) != tuple(hook) else 0
         hook_frames = sum(chunk_frames(c) for c in hook_chunks)
         budget = max(0, max_output_frames - hook_frames)
-        if ending_frames and ending_frames < budget:
+        hero_reserved = bool(ending_frames and ending_frames <= budget)
+        if hero_reserved:
             budget -= ending_frames
 
         remaining = [c for c in available_chunks if tuple(c) not in selected_keys and tuple(c) != tuple(hero)]
@@ -1105,19 +1219,29 @@ class DJ_AutoEditor:
             budget = add_chunk(chunk, budget)
 
         if tuple(hero) not in selected_keys:
-            if chunk_frames(hero) <= budget:
+            if hero_reserved:
+                selected.append(hero)
+                selected_keys.add(tuple(hero))
+            elif chunk_frames(hero) <= budget:
                 budget = add_chunk(hero, budget)
-            elif selected:
+            elif len(selected) > len(hook_chunks):
                 weakest_i = min(
-                    range(len(selected)),
+                    range(len(hook_chunks), len(selected)),
                     key=lambda i: cls._commercial_chunk_score(selected[i], source_scores, fps, all_images),
                 )
-                if weakest_i >= len(hook_chunks) and chunk_frames(hero) <= chunk_frames(selected[weakest_i]):
+                if chunk_frames(hero) <= chunk_frames(selected[weakest_i]):
                     selected_keys.discard(tuple(selected[weakest_i]))
                     selected[weakest_i] = hero
                     selected_keys.add(tuple(hero))
 
-        selected = list(hook_chunks) + cls._fix_consecutive(selected[len(hook_chunks):])
+        tail = list(selected[len(hook_chunks):])
+        if tuple(hero) in [tuple(c) for c in tail]:
+            tail.remove(hero)
+            tail = cls._fix_consecutive(tail)
+            tail.append(hero)
+        else:
+            tail = cls._fix_consecutive(tail)
+        selected = list(hook_chunks) + tail
         selected_frames = sum(chunk_frames(c) for c in selected)
         plan = {
             "trimmed": selected_frames < total_frames,
@@ -1434,6 +1558,11 @@ class DJ_AutoEditor:
         enable_contrast_protect = True
         enable_phased = False
         lyrics_text = str(kwargs.get("lyrics_text", "") or "")
+        target_duration_seconds = self._safe_float(
+            kwargs.get("target_duration_seconds", 0.0), 0.0
+        )
+        if not math.isfinite(target_duration_seconds) or target_duration_seconds < 0:
+            target_duration_seconds = 0.0
 
         stale_model_values = {"", "ON", "OFF", "(ollama offline)", "(no models found)"}
         if not isinstance(llm_model, str) or llm_model in stale_model_values or llm_model.startswith("("):
@@ -1450,6 +1579,10 @@ class DJ_AutoEditor:
         print("[AutoEditor] AI DIRECTOR MODE: ALWAYS ON")
         print("[AutoEditor] The node will choose the mood/edit plan and apply professional settings.")
         print(f"[AutoEditor] Video understanding: {video_understanding} ({'Florence-2 ' + vision_quality if enable_vision else 'skipped'})")
+        if target_duration_seconds > 0:
+            print(f"[AutoEditor] Requested exact duration: {target_duration_seconds:g} seconds")
+        else:
+            print("[AutoEditor] Duration: automatic")
         if llm_prompt and llm_prompt.strip():
             print(f"[AutoEditor] Creative direction: \"{llm_prompt.strip()[:140]}\"")
         else:
@@ -1574,6 +1707,16 @@ class DJ_AutoEditor:
             all_images[idx] = self._match_resolution(all_images[idx], target_h, target_w)
 
         memory_plan = self._premium_memory_budget(fps, target_h, target_w, total_source_frames)
+        memory_plan = self._apply_requested_duration(
+            memory_plan, target_duration_seconds, fps
+        )
+        if memory_plan.get("duration_mode") == "exact":
+            print(
+                f"[AutoEditor] Exact duration: {target_duration_seconds:g}s x "
+                f"{fps:g}fps = {memory_plan['target_output_frames']} frames"
+            )
+            if memory_plan.get("target_exceeds_memory_cap"):
+                print("[AutoEditor] Warning: requested duration exceeds the conservative memory estimate; using memory-safe batches where possible")
         print(
             f"[AutoEditor] Premium mode: {memory_plan['guard_mode']} | "
             f"source {memory_plan['source_seconds']:.1f}s, target "
@@ -1957,11 +2100,33 @@ class DJ_AutoEditor:
             print(f"[AutoEditor] ✨ Applying {len(visual_effects)} visual effects...")
             combined_frames = apply_visual_effects(combined_frames, visual_effects)
 
-        if memory_plan.get("guard_mode") == "full_source_for_standard_tiktok_ad":
+        duration_fit_method = "automatic"
+        target_final_frames = None
+        if memory_plan.get("duration_mode") == "exact":
+            target_final_frames = int(memory_plan["target_output_frames"])
+        elif memory_plan.get("guard_mode") == "full_source_for_standard_tiktok_ad":
             target_final_frames = int(memory_plan.get("source_frames", total_source_frames))
-            if target_final_frames > 0 and combined_frames.shape[0] != target_final_frames:
-                before_frames = combined_frames.shape[0]
-                combined_frames = self._match_frame_count(combined_frames, target_final_frames)
+
+        if target_final_frames and combined_frames.shape[0] != target_final_frames:
+            before_frames = int(combined_frames.shape[0])
+            if memory_plan.get("duration_mode") == "exact":
+                hook_frames = int(round(float(arc_plan.get("hook_seconds", 0.0)) * fps))
+                combined_frames, duration_fit_method = self._fit_exact_timeline(
+                    combined_frames, target_final_frames, fps, hook_frames=hook_frames
+                )
+                print(
+                    f"[AutoEditor] Exact duration lock: {before_frames} -> "
+                    f"{target_final_frames} frames ({duration_fit_method})"
+                )
+                tweaks_applied.append(
+                    f"Exact duration: {before_frames}->{target_final_frames} frames; "
+                    f"{duration_fit_method}"
+                )
+            else:
+                combined_frames = self._match_frame_count(
+                    combined_frames, target_final_frames
+                )
+                duration_fit_method = "restored automatic full-source duration"
                 print(
                     f"[AutoEditor] Duration lock restored standard ad length: "
                     f"{before_frames} -> {target_final_frames} frames"
@@ -1969,8 +2134,14 @@ class DJ_AutoEditor:
                 tweaks_applied.append(
                     f"Duration lock: restored {before_frames}->{target_final_frames} frames"
                 )
+        elif target_final_frames:
+            duration_fit_method = "already exact"
 
-        # ── Sanitize audio ────────────────────────────────────────────────
+        config["duration_fit_method"] = duration_fit_method
+        config["target_duration_seconds"] = target_duration_seconds
+        config["target_output_frames"] = target_final_frames
+
+        # Sanitize audio ────────────────────────────────────────────────
         target_audio_samples = int(combined_frames.shape[0] / fps * sample_rate)
         if combined_audio.shape[-1] != target_audio_samples:
             before_samples = combined_audio.shape[-1]
@@ -2194,6 +2365,12 @@ class DJ_AutoEditor:
         r.append(f"  {final_duration:.1f}s output from {total_source_dur:.1f}s of source footage")
         r.append(f"  {len(frame_segments)} cuts at {fps}fps • {target_w}×{target_h}")
         r.append(f"  Output frames: {final_frames}")
+        if memory_plan.get("duration_mode") == "exact":
+            r.append(
+                f"  Requested exact duration: {memory_plan.get('requested_output_seconds', 0):g}s "
+                f"= {memory_plan.get('target_output_frames', final_frames)} frames at {fps:g}fps"
+            )
+            r.append(f"  Duration fit: {config.get('duration_fit_method', 'already exact')}")
         r.append(f"  Duration policy: {config.get('duration_policy', 'flexible_punchy_sales_edit')}")
         r.append(f"  Recommended song BPM: {config.get('recommended_bpm', 'see INT output')}")
         if arc_plan.get("trimmed"):
