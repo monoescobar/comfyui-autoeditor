@@ -27,7 +27,7 @@ from .ollama_bridge import (
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.20.1"
+AUTOEDITOR_NODE_VERSION = "v2026.06.20.2"
 MAX_FRAME_BATCH_ELEMENTS = 12_000_000
 PREMIUM_HOOK_MIN_SECONDS = 1.0
 PREMIUM_HOOK_TARGET_SECONDS = 1.7
@@ -59,13 +59,6 @@ class DJ_AutoEditor:
                 "video_info2": ("VHS_VIDEOINFO",),
             },
             "optional": {
-                "target_duration_seconds": ("FLOAT", {
-                    "default": 0.0,
-                    "min": 0.0,
-                    "max": 600.0,
-                    "step": 1.0,
-                    "tooltip": "Exact final video length in seconds. 0 keeps automatic duration. Final frames are seconds multiplied by the FPS from video 1.",
-                }),
                 "video_understanding": (["ON", "FAST", "OFF"], {
                     "default": "FAST",
                     "tooltip": "Controls Florence-2 video understanding. ON=best quality/slow, FAST=fewer keyframes, OFF=skip vision analysis.",
@@ -74,6 +67,14 @@ class DJ_AutoEditor:
                     "default": "",
                     "multiline": True,
                     "placeholder": "Optional lyrics for music direction. Auto Editor uses this with video mood and BPM to recommend ACE-Step keyscale, time signature, and tags.",
+                }),
+                # Keep existing widgets first; saved ComfyUI workflows restore them by position.
+                "target_duration_seconds": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 600.0,
+                    "step": 1.0,
+                    "tooltip": "Exact final video length in seconds. 0 keeps automatic duration. Final frames are seconds multiplied by the FPS from video 1.",
                 }),
                 # Source videos
                 "audio1": ("AUDIO",),
@@ -93,6 +94,10 @@ class DJ_AutoEditor:
             }
         }
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, video_understanding=None):
+        # Stale values from older widget layouts are normalized to FAST in auto_edit.
+        return True
     CATEGORY = "audio/video processing"
     FUNCTION = "auto_edit"
     RETURN_NAMES = (
