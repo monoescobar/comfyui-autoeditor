@@ -14,7 +14,7 @@ from .text_renderer import TextRenderer, DISPLAY_STYLES, LINE_MODES, POSITIONS
 from .ollama_bridge import list_ollama_models
 
 
-LYRICS_OVERLAY_NODE_VERSION = "v2026.06.20.2"
+LYRICS_OVERLAY_NODE_VERSION = "v2026.06.20.3"
 LYRICS_FONT_SCALE = 0.85
 
 

@@ -52,6 +52,45 @@ def _normalize_word(text):
     return re.sub(r"[^\w']", "", text, flags=re.UNICODE)
 
 
+def _has_vocal_stretch(text):
+    """Detect written held vowels such as ooooo, ahhhh, or yeaaah."""
+    return bool(re.search(r"([aeiouy])\1{2,}", _normalize_word(text), re.IGNORECASE))
+
+
+def _vocal_match_form(text):
+    """Match held vowels to their normally written lyric form."""
+    return re.sub(r"([aeiouy])\1+", r"\1", _normalize_word(text), flags=re.IGNORECASE)
+
+
+def _stretch_display_word(word, repetitions=2):
+    """Create a readable held-vowel spelling for repeated vocal tokens."""
+    if _has_vocal_stretch(word):
+        return word
+    vowel_positions = [i for i, char in enumerate(word) if char.lower() in "aeiouy"]
+    if not vowel_positions:
+        return word
+    index = vowel_positions[-1]
+    extra = min(8, max(3, int(repetitions) * 2))
+    return word[:index + 1] + word[index] * extra + word[index + 1:]
+
+
+def _prefer_stretched_transcript(provided_word, transcript_word):
+    """Use Whisper's stretched spelling while retaining lyric punctuation."""
+    candidate = str(transcript_word or "").strip()
+    if not _has_vocal_stretch(candidate):
+        return provided_word
+    candidate = re.sub(
+        r"([aeiouy])\1{10,}",
+        lambda match: match.group(1) * 10,
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    punctuation = re.search(r"[^\w']+$", str(provided_word))
+    if punctuation and not re.search(r"[^\w']+$", candidate):
+        candidate += punctuation.group(0)
+    return candidate
+
+
 _LYRIC_METADATA_RE = re.compile(
     r"^[\[<{]\s*(?:intro|verse|pre[- ]?chorus|chorus|post[- ]?chorus|hook|bridge|outro|"
     r"instrumental|music|break|interlude|drop|refrain|repeat|end|fade|solo|spoken|"
@@ -348,6 +387,7 @@ def _align_to_whisper(lines, whisper_words, audio_duration):
                     "end": whisper_words[wi]["end"],
                     "interpolated": False,
                     "whisper_idx": wi,
+                    "transcript_word": whisper_words[wi]["word"].strip(),
                 }
                 whisper_used[wi] = True
 
@@ -377,10 +417,16 @@ def _align_to_whisper(lines, whisper_words, audio_duration):
                 if whisper_used[wi]:
                     continue
                 ww = whisper_normalized[wi]
-                # Quick length check before expensive ratio calculation
-                if abs(len(lw) - len(ww)) > max(len(lw), len(ww)) * 0.5:
+                stretch_equivalent = (
+                    (_has_vocal_stretch(lw) or _has_vocal_stretch(ww))
+                    and _vocal_match_form(lw) == _vocal_match_form(ww)
+                )
+                # Held vowels can differ greatly in length but still be the same sung word.
+                if not stretch_equivalent and abs(len(lw) - len(ww)) > max(len(lw), len(ww)) * 0.5:
                     continue
-                score = difflib.SequenceMatcher(None, lw, ww, autojunk=False).ratio()
+                score = 1.0 if stretch_equivalent else difflib.SequenceMatcher(
+                    None, lw, ww, autojunk=False
+                ).ratio()
                 if score > best_score:
                     best_score = score
                     best_wi = wi
@@ -405,9 +451,11 @@ def _align_to_whisper(lines, whisper_words, audio_duration):
                     "end": whisper_words[best_wi]["end"],
                     "interpolated": False,
                     "whisper_idx": best_wi,
+                    "transcript_word": whisper_words[best_wi]["word"].strip(),
                 }
                 whisper_used[best_wi] = True
 
+    _extend_vocal_holds(timestamps, flat_lyrics, whisper_words, whisper_used)
     _drop_non_monotonic_matches(timestamps)
 
     matched_after_guard = sum(1 for t in timestamps if t is not None)
@@ -430,11 +478,20 @@ def _align_to_whisper(lines, whisper_words, audio_duration):
             ts = timestamps[flat_idx] if flat_idx < len(timestamps) else None
             if ts is None:
                 ts = {"start": 0.0, "end": 0.1, "interpolated": True}
+            display_word = _prefer_stretched_transcript(
+                line["words"][word_idx], ts.get("transcript_word")
+            )
+            if ts.get("vocal_hold") and not _has_vocal_stretch(display_word):
+                display_word = _stretch_display_word(
+                    display_word, ts.get("hold_repetitions", 2)
+                )
             line_words.append({
-                "word": line["words"][word_idx],
+                "word": display_word,
                 "start": ts["start"],
                 "end": ts["end"],
                 "interpolated": ts.get("interpolated", False),
+                "vocal_hold": ts.get("vocal_hold", False),
+                "hold_repetitions": ts.get("hold_repetitions", 1),
             })
 
         line_start = line_words[0]["start"] if line_words else 0.0
@@ -448,6 +505,40 @@ def _align_to_whisper(lines, whisper_words, audio_duration):
         })
 
     return result
+
+
+def _extend_vocal_holds(timestamps, flat_lyrics, whisper_words, whisper_used):
+    """Join adjacent repeated Whisper tokens into one visible held vocal."""
+    for lyric_index, timestamp in enumerate(timestamps):
+        if timestamp is None or "whisper_idx" not in timestamp:
+            continue
+        whisper_index = timestamp["whisper_idx"]
+        base_word = flat_lyrics[lyric_index]["display"]
+        base_form = _vocal_match_form(timestamp.get("transcript_word") or base_word)
+        if not base_form:
+            continue
+
+        repetitions = 0
+        next_index = whisper_index + 1
+        while next_index < len(whisper_words) and repetitions < 6:
+            if whisper_used[next_index]:
+                break
+            candidate = whisper_words[next_index]
+            gap = float(candidate["start"]) - float(timestamp["end"])
+            if gap > 0.18:
+                break
+            if _vocal_match_form(candidate["word"]) != base_form:
+                break
+            timestamp["end"] = max(float(timestamp["end"]), float(candidate["end"]))
+            whisper_used[next_index] = True
+            repetitions += 1
+            if _has_vocal_stretch(candidate["word"]):
+                timestamp["transcript_word"] = candidate["word"].strip()
+            next_index += 1
+
+        if repetitions:
+            timestamp["vocal_hold"] = True
+            timestamp["hold_repetitions"] = repetitions + 1
 
 
 def _drop_non_monotonic_matches(timestamps):
@@ -566,7 +657,13 @@ def _alignment_reliability(aligned_lines, total_lyrics_words, transcript_word_co
     if matched < minimum_matches:
         return False, f"only {matched}/{total_lyrics_words} reliable word anchors"
 
-    transcript_ratio = transcript_word_count / max(total_lyrics_words, 1)
+    hold_continuations = sum(
+        max(0, int(word.get("hold_repetitions", 1)) - 1)
+        for line in aligned_lines
+        for word in line.get("words", [])
+    )
+    effective_transcript_words = max(1, transcript_word_count - hold_continuations)
+    transcript_ratio = effective_transcript_words / max(total_lyrics_words, 1)
     if transcript_ratio < 0.25 or transcript_ratio > 4.0:
         return False, f"transcript/lyrics word ratio {transcript_ratio:.2f} is unreliable"
 

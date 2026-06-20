@@ -33,6 +33,7 @@ DISPLAY_STYLES = [
 LINE_MODES = ["single_line", "two_lines", "three_lines", "word_by_word", "full_verse"]
 
 POSITIONS = ["top", "upper_third", "center", "lower_third", "bottom"]
+LYRIC_RENDER_LOOKAHEAD_SECONDS = 0.025
 
 
 def _parse_color(hex_str):
@@ -404,17 +405,19 @@ class TextRenderer:
         # Transform lyrics based on line_display mode
         display_lyrics = self._prepare_display_lyrics(aligned_lyrics)
 
-        line_idx, word_idx = self._find_position(timestamp, display_lyrics)
+        # Compensate for half a 25fps frame of display quantization.
+        lyric_timestamp = timestamp + LYRIC_RENDER_LOOKAHEAD_SECONDS
+        line_idx, word_idx = self._find_position(lyric_timestamp, display_lyrics)
         if line_idx is None:
             return frame_tensor
-        if not self._visible_word_items(display_lyrics[line_idx], timestamp):
+        if not self._visible_word_items(display_lyrics[line_idx], lyric_timestamp):
             return frame_tensor
 
         overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
         ctx = {
             "line_idx": line_idx, "word_idx": word_idx or 0,
-            "timestamp": timestamp, "bpm": bpm,
+            "timestamp": lyric_timestamp, "bpm": bpm,
             "lyrics": display_lyrics, "w": w, "h": h,
         }
 
@@ -474,13 +477,14 @@ class TextRenderer:
         if not sizes:
             return
 
-        fade_dur = 0.15
+        fade_in = 0.06
+        fade_out = 0.12
         line_alpha = 255
         t = ctx["timestamp"]
-        if t - line["line_start"] < fade_dur:
-            line_alpha = int(255 * (t - line["line_start"]) / fade_dur)
-        elif line["line_end"] - t < fade_dur:
-            line_alpha = int(255 * (line["line_end"] - t) / fade_dur)
+        if t - line["line_start"] < fade_in:
+            line_alpha = max(160, int(255 * (t - line["line_start"]) / fade_in))
+        elif line["line_end"] - t < fade_out:
+            line_alpha = int(255 * (line["line_end"] - t) / fade_out)
         line_alpha = max(0, min(255, line_alpha))
 
         for (original_idx, w_info), word, pos in zip(visible_items, words, positions):
