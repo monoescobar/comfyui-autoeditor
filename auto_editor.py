@@ -27,7 +27,7 @@ from .ollama_bridge import (
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.20.4"
+AUTOEDITOR_NODE_VERSION = "v2026.06.20.5"
 MAX_FRAME_BATCH_ELEMENTS = 12_000_000
 PREMIUM_HOOK_MIN_SECONDS = 1.0
 PREMIUM_HOOK_TARGET_SECONDS = 1.7
