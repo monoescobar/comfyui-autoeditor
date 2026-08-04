@@ -14,7 +14,7 @@ from .text_renderer import TextRenderer, DISPLAY_STYLES, LINE_MODES, POSITIONS
 from .ollama_bridge import list_ollama_models
 
 
-LYRICS_OVERLAY_NODE_VERSION = "v2026.06.20.3"
+LYRICS_OVERLAY_NODE_VERSION = "v2026.08.04.1"
 LYRICS_FONT_SCALE = 0.85
 
 
@@ -109,7 +109,7 @@ class DJ_LyricsOverlay:
             }
         }
 
-    CATEGORY = "audio/video processing"
+    CATEGORY = "🎬 Escobarte/Video"
     FUNCTION = "overlay_lyrics"
     RETURN_NAMES = ("images_output", "audio_output", "video_info_output", "sync_report")
     RETURN_TYPES = ("IMAGE", "AUDIO", "VHS_VIDEOINFO", "STRING")

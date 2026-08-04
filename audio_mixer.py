@@ -100,7 +100,7 @@ class DJ_AudioMixer:
             },
         }
 
-    CATEGORY = "audio/video processing"
+    CATEGORY = "🎬 Escobarte/Audio"
     FUNCTION = "mix_audio"
     RETURN_NAMES = ("audio_output", "mix_report")
     RETURN_TYPES = ("AUDIO", "STRING")

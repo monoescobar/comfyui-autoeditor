@@ -27,7 +27,7 @@ from .ollama_bridge import (
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.06.20.5"
+AUTOEDITOR_NODE_VERSION = "v2026.08.04.1"
 MAX_FRAME_BATCH_ELEMENTS = 12_000_000
 PREMIUM_HOOK_MIN_SECONDS = 1.0
 PREMIUM_HOOK_TARGET_SECONDS = 1.7
@@ -97,7 +97,7 @@ class DJ_AutoEditor:
     def VALIDATE_INPUTS(cls, video_understanding=None):
         # Stale values from older widget layouts are normalized to FAST in auto_edit.
         return True
-    CATEGORY = "audio/video processing"
+    CATEGORY = "🎬 Escobarte/Video"
     FUNCTION = "auto_edit"
     RETURN_NAMES = (
         "images_output", "audio_output", "video_info_output", "edit_report",
