@@ -15,6 +15,17 @@ import math
 
 
 class DJ_AudioMixer:
+    DESCRIPTION = (
+        "Mix two ComfyUI AUDIO inputs with equal-power balance, sample-rate and "
+        "channel matching, optional fades, DC-offset removal, normalization, and "
+        "a protective limiter. The second output documents the exact mix settings "
+        "and measured levels. Source audio payloads are not modified in place."
+    )
+    OUTPUT_TOOLTIPS = (
+        "Mixed ComfyUI AUDIO payload with waveform and sample rate.",
+        "Human-readable settings, duration, channel, peak, RMS, and headroom report.",
+    )
+
     def __init__(self):
         pass
 
@@ -22,8 +33,8 @@ class DJ_AudioMixer:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "audio1": ("AUDIO",),
-                "audio2": ("AUDIO",),
+                "audio1": ("AUDIO", {"tooltip": "First source track. It is mixed without modifying the input payload."}),
+                "audio2": ("AUDIO", {"tooltip": "Second source track. Fade and crossfade controls are applied to this track."}),
                 "mix_balance": ("INT", {
                     "default": 50, "min": 0, "max": 100, "step": 1,
                     "tooltip": (

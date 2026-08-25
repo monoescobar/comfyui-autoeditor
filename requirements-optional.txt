@@ -1,0 +1,4 @@
+# Install only with ComfyUI's Python and only for the feature you need.
+openai-whisper
+transformers
+huggingface-hub

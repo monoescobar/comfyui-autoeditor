@@ -27,7 +27,7 @@ from .ollama_bridge import (
 from .vision_analysis import analyze_videos, format_descriptions_for_llm, detect_distortions, remove_distorted_frames, get_vision_quality_names
 
 
-AUTOEDITOR_NODE_VERSION = "v2026.08.04.1"
+AUTOEDITOR_NODE_VERSION = "v2026.08.25.1"
 MAX_FRAME_BATCH_ELEMENTS = 12_000_000
 PREMIUM_HOOK_MIN_SECONDS = 1.0
 PREMIUM_HOOK_TARGET_SECONDS = 1.7
@@ -35,6 +35,26 @@ PREMIUM_HOOK_MAX_SECONDS = 2.35
 
 
 class DJ_AutoEditor:
+    DESCRIPTION = (
+        "Create one editorial sequence from two to six source-video frame batches. "
+        "The node analyzes available footage, builds a deterministic edit plan, "
+        "uses every source frame where possible, and returns edited frames, audio, "
+        "VHS video information, a human-readable edit report, vision notes, and "
+        "music-direction metadata. Ollama and Florence analysis are optional."
+    )
+    OUTPUT_TOOLTIPS = (
+        "Edited IMAGE frame batch.",
+        "Selected or synchronized ComfyUI AUDIO payload.",
+        "VHS_VIDEOINFO updated for the edited frame sequence.",
+        "Human-readable record of the edit plan and applied choices.",
+        "Per-source visual-analysis notes, or an explanation when analysis is disabled.",
+        "Exact number of frames returned in images_output.",
+        "Suggested music tempo in beats per minute.",
+        "Suggested musical key and scale.",
+        "Suggested time-signature numerator, such as 4 for 4/4.",
+        "Suggested production and arrangement tags for a music generator.",
+    )
+
     def __init__(self):
         pass
 
@@ -47,16 +67,20 @@ class DJ_AutoEditor:
 
         return {
             "required": {
-                "llm_model": (ollama_models, {"default": ollama_models[0]}),
+                "llm_model": (ollama_models, {
+                    "default": ollama_models[0],
+                    "tooltip": "Local Ollama model used only for Auto/LLM creative planning. Offline mode falls back to deterministic rules.",
+                }),
                 "llm_prompt": ("STRING", {
                     "default": "",
                     "multiline": True,
                     "placeholder": "Optional creative direction. Example: premium skincare, elegant but energetic, make the product feel real and desirable.",
+                    "tooltip": "Optional editorial direction. Leave empty for automatic planning from the footage and selected analysis mode.",
                 }),
-                "images1": ("IMAGE",),
-                "video_info1": ("VHS_VIDEOINFO",),
-                "images2": ("IMAGE",),
-                "video_info2": ("VHS_VIDEOINFO",),
+                "images1": ("IMAGE", {"tooltip": "Required first source-video frame batch."}),
+                "video_info1": ("VHS_VIDEOINFO", {"tooltip": "VHS timing and source metadata corresponding to images1."}),
+                "images2": ("IMAGE", {"tooltip": "Required second source-video frame batch."}),
+                "video_info2": ("VHS_VIDEOINFO", {"tooltip": "VHS timing and source metadata corresponding to images2."}),
             },
             "optional": {
                 "video_understanding": (["ON", "FAST", "OFF"], {
@@ -67,6 +91,7 @@ class DJ_AutoEditor:
                     "default": "",
                     "multiline": True,
                     "placeholder": "Optional lyrics for music direction. Auto Editor uses this with video mood and BPM to recommend ACE-Step keyscale, time signature, and tags.",
+                    "tooltip": "Optional lyrics used for music-direction recommendations; they are not written into the video frames.",
                 }),
                 # Keep existing widgets first; saved ComfyUI workflows restore them by position.
                 "target_duration_seconds": ("STRING", {
@@ -76,20 +101,20 @@ class DJ_AutoEditor:
                     "tooltip": "Saved exact final length in seconds. 0 or blank uses automatic/full available footage. Final frames are seconds multiplied by the FPS from video 1.",
                 }),
                 # Source videos
-                "audio1": ("AUDIO",),
-                "audio2": ("AUDIO",),
-                "images3": ("IMAGE",),
-                "audio3": ("AUDIO",),
-                "video_info3": ("VHS_VIDEOINFO",),
-                "images4": ("IMAGE",),
-                "audio4": ("AUDIO",),
-                "video_info4": ("VHS_VIDEOINFO",),
-                "images5": ("IMAGE",),
-                "audio5": ("AUDIO",),
-                "video_info5": ("VHS_VIDEOINFO",),
-                "images6": ("IMAGE",),
-                "audio6": ("AUDIO",),
-                "video_info6": ("VHS_VIDEOINFO",),
+                "audio1": ("AUDIO", {"tooltip": "Optional audio corresponding to source 1."}),
+                "audio2": ("AUDIO", {"tooltip": "Optional audio corresponding to source 2."}),
+                "images3": ("IMAGE", {"tooltip": "Optional third source-video frame batch."}),
+                "audio3": ("AUDIO", {"tooltip": "Optional audio corresponding to source 3."}),
+                "video_info3": ("VHS_VIDEOINFO", {"tooltip": "VHS timing and metadata corresponding to images3."}),
+                "images4": ("IMAGE", {"tooltip": "Optional fourth source-video frame batch."}),
+                "audio4": ("AUDIO", {"tooltip": "Optional audio corresponding to source 4."}),
+                "video_info4": ("VHS_VIDEOINFO", {"tooltip": "VHS timing and metadata corresponding to images4."}),
+                "images5": ("IMAGE", {"tooltip": "Optional fifth source-video frame batch."}),
+                "audio5": ("AUDIO", {"tooltip": "Optional audio corresponding to source 5."}),
+                "video_info5": ("VHS_VIDEOINFO", {"tooltip": "VHS timing and metadata corresponding to images5."}),
+                "images6": ("IMAGE", {"tooltip": "Optional sixth source-video frame batch."}),
+                "audio6": ("AUDIO", {"tooltip": "Optional audio corresponding to source 6."}),
+                "video_info6": ("VHS_VIDEOINFO", {"tooltip": "VHS timing and metadata corresponding to images6."}),
             }
         }
 

@@ -1,0 +1,3 @@
+# Core tensor, NumPy, and Pillow dependencies are supplied by ComfyUI.
+# Optional capabilities are intentionally not auto-installed; see
+# requirements-optional.txt and README.md.

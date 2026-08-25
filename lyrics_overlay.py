@@ -14,11 +14,24 @@ from .text_renderer import TextRenderer, DISPLAY_STYLES, LINE_MODES, POSITIONS
 from .ollama_bridge import list_ollama_models
 
 
-LYRICS_OVERLAY_NODE_VERSION = "v2026.08.04.1"
+LYRICS_OVERLAY_NODE_VERSION = "v2026.08.25.1"
 LYRICS_FONT_SCALE = 0.85
 
 
 class DJ_LyricsOverlay:
+    DESCRIPTION = (
+        "Align supplied lyrics to a song and render readable animated text over an "
+        "IMAGE video frame batch. Whisper alignment is used when available, with "
+        "a deterministic fallback. The original audio is passed through unchanged, "
+        "and the sync report records timing, style, FPS, and alignment decisions."
+    )
+    OUTPUT_TOOLTIPS = (
+        "Video frames with the selected lyrics treatment rendered on top.",
+        "Original song AUDIO passed through unchanged.",
+        "Input VHS_VIDEOINFO passed through for downstream video saving.",
+        "Human-readable alignment, FPS, style, and timing report.",
+    )
+
     def __init__(self):
         pass
 
@@ -34,13 +47,14 @@ class DJ_LyricsOverlay:
 
         return {
             "required": {
-                "song_audio": ("AUDIO",),
+                "song_audio": ("AUDIO", {"tooltip": "Song audio used for lyric alignment and passed through unchanged."}),
                 "lyrics_text": ("STRING", {
                     "default": "",
                     "multiline": True,
                     "placeholder": "Paste your song lyrics here.\nEach line = one subtitle line.\nBlank lines are ignored.",
+                    "tooltip": "Lyrics to align and render. Keep the intended line breaks; blank lines are ignored.",
                 }),
-                "video_frames": ("IMAGE",),
+                "video_frames": ("IMAGE", {"tooltip": "Complete video frame batch that will receive the lyric overlay."}),
                 "display_style": (DISPLAY_STYLES, {
                     "default": "subtitles",
                     "tooltip": "Text animation style. karaoke=word highlight, word_pop=viral TikTok, neon_flash=EDM/club",
@@ -51,7 +65,7 @@ class DJ_LyricsOverlay:
                 }),
             },
             "optional": {
-                "video_info": ("VHS_VIDEOINFO",),
+                "video_info": ("VHS_VIDEOINFO", {"tooltip": "Optional VHS timing metadata used to resolve the source FPS accurately."}),
                 "fps_override": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 120.0, "step": 0.1,
                     "tooltip": "Override FPS (0=auto from video_info, or 25fps default). Set this if lyrics are out of sync.",
@@ -60,7 +74,10 @@ class DJ_LyricsOverlay:
                     "default": "OFF",
                     "tooltip": "When ON, LLM auto-picks style/colors/font based on lyrics content. Manual settings ignored.",
                 }),
-                "llm_model": (ollama_models, {"default": ollama_models[0]}),
+                "llm_model": (ollama_models, {
+                    "default": ollama_models[0],
+                    "tooltip": "Local Ollama model used only when ai_stylist is ON. Offline mode preserves manual styling.",
+                }),
                 "timing_offset_ms": ("INT", {
                     "default": 0, "min": -2000, "max": 2000, "step": 10,
                     "tooltip": "Manual timing offset in ms. Positive=lyrics appear later, Negative=earlier.",
@@ -72,6 +89,7 @@ class DJ_LyricsOverlay:
                 "font_family": (["arial", "impact", "roboto", "montserrat", "bebas_neue",
                                   "comic_sans", "times", "courier"], {
                     "default": "arial",
+                    "tooltip": "Font family. System fonts are preferred; supported open fonts may be downloaded and cached only when needed.",
                 }),
                 "text_color": ("STRING", {
                     "default": "#FFFFFF",
@@ -87,21 +105,29 @@ class DJ_LyricsOverlay:
                 }),
                 "text_alignment": (["left", "center", "right"], {
                     "default": "center",
+                    "tooltip": "Horizontal alignment inside the chosen text region.",
                 }),
                 "outline_thickness": ("INT", {
                     "default": 3, "min": 0, "max": 10, "step": 1,
+                    "tooltip": "Outline width in pixels. Use zero to disable the outline.",
                 }),
                 "outline_color": ("STRING", {
                     "default": "#000000",
+                    "tooltip": "Outline color as a six-digit hexadecimal color.",
                 }),
                 "background_style": (["none", "solid_bar", "gradient_bar", "rounded_box",
                                        "blur_box", "shadow_only"], {
                     "default": "none",
+                    "tooltip": "Optional readability treatment rendered behind the lyrics.",
                 }),
                 "background_opacity": ("FLOAT", {
                     "default": 0.6, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Opacity of the selected background treatment.",
                 }),
-                "text_shadow": (["enable", "disable"], {"default": "enable"}),
+                "text_shadow": (["enable", "disable"], {
+                    "default": "enable",
+                    "tooltip": "Add a soft shadow to improve text separation from the video.",
+                }),
                 "line_display": (LINE_MODES, {
                     "default": "single_line",
                     "tooltip": "How many lyrics lines to show at once",

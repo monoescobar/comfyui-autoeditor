@@ -1,5 +1,6 @@
 import sys
 
+__version__ = "2026.8.25.1"
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -15,3 +16,5 @@ NODE_CLASS_MAPPINGS = {**AE_NODES, **AM_NODES, **LO_NODES}
 NODE_DISPLAY_NAME_MAPPINGS = {**AE_NAMES, **AM_NAMES, **LO_NAMES}
 
 WEB_DIRECTORY = "./web"
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY", "__version__"]
