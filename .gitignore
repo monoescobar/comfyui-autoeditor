@@ -25,3 +25,9 @@ models/
 *.ckpt
 *.pt
 *.pth
+
+# Fonts downloaded on demand by TextRenderer. Keep licensing and binary caches
+# outside source control; fonts/README.md documents the behavior.
+fonts/*.ttf
+fonts/*.otf
+!fonts/README.md

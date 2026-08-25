@@ -1,0 +1,20 @@
+[project]
+name = "comfyui-autoeditor"
+version = "2026.8.25.1"
+description = "Auditable video editing, audio mixing, and synchronized lyric overlays for ComfyUI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = []
+
+[project.optional-dependencies]
+lyrics = ["openai-whisper"]
+vision = ["transformers", "huggingface-hub"]
+
+[project.urls]
+Repository = "https://github.com/monoescobar/comfyui-autoeditor"
+Issues = "https://github.com/monoescobar/comfyui-autoeditor/issues"
+
+[tool.comfy]
+PublisherId = "monoescobar"
+DisplayName = "ComfyUI AutoEditor"
